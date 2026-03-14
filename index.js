@@ -1,5 +1,5 @@
 const express = require('express');
-const { TableStore } = require('tablestore');
+const TableStore = require('tablestore'); // 注意：这里不是解构赋值
 const axios = require('axios');
 
 const app = express();
