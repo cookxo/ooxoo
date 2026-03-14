@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=yes">
+    <title>K线之王 · 永续合约模拟</title>
+    <!-- Lightweight Charts -->
+    <script src="https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js"></script>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            background: #f8fafc; padding: 12px; color: #1a2639; font-size: 14px; line-height: 1.4;
+        }
+        .card {
+            background: white; border-radius: 20px; padding: 16px; margin-bottom: 16px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.03); border: 1px solid #f0f3f7;
+        }
+        .card-title {
+            font-weight: 600; font-size: 16px; margin-bottom: 14px; color: #1e293b;
+            display: flex; align-items: center; gap: 6px; letter-spacing: -0.2px;
+        }
+        .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+        label {
+            display: block; font-size: 12px; font-weight: 500; color: #64748b;
+            margin-bottom: 4px; letter-spacing: -0.2px;
+        }
+        input, select {
+            width: 100%; padding: 10px 12px; border: 1.5px solid #e2e8f0; border-radius: 14px;
+            font-size: 15px; background: white; transition: border 0.2s;
+        }
+        input:focus, select:focus { border-color: #3b82f6; outline: none; }
+        .radio-group {
+            display: flex; gap: 18px; align-items: center; height: 42px;
+            flex-wrap: nowrap; white-space: nowrap;
+        }
+        .radio-group label {
+            display: flex; align-items: center; gap: 6px; font-size: 15px;
+            color: #1e293b; margin: 0; cursor: pointer; font-weight: 400;
+        }
+        @media (max-width: 360px) {
+            .radio-group label { font-size: 13px; }
+            .radio-group { gap: 12px; }
+        }
+        button {
+            width: 100%; padding: 12px 18px; border-radius: 40px; font-size: 16px;
+            font-weight: 600; border: none; cursor: pointer; transition: 0.2s;
+            background: #3b82f6; color: white; box-shadow: 0 4px 10px rgba(59,130,246,0.3);
+        }
+        button:active { transform: scale(0.97); opacity: 0.9; }
+        .btn-outline {
+            background: white; color: #334155; border: 1.5px solid #e2e8f0;
+            box-shadow: none;
+        }
+        .status-badge {
+            display: inline-block; padding: 4px 12px; border-radius: 30px; font-size: 12px;
+            font-weight: 600; white-space: nowrap; background: #f1f5f9; color: #334155;
+        }
+        .running { background: #dcfce7; color: #166534; }
+        .stopped { background: #fee2e2; color: #991b1b; }
+        .info-grid {
+            display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 12px 0 6px;
+        }
+        .info-item {
+            background: #f8fafc; border-radius: 16px; padding: 10px; border: 1px solid #f1f5f9;
+        }
+        .info-label { font-size: 11px; color: #64748b; margin-bottom: 2px; }
+        .info-value { 
+            font-size: 18px; font-weight: 700; color: #0f172a;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        }
+        .position-box {
+            background: #eff6ff; border-left: 5px solid #3b82f6; border-radius: 16px;
+            padding: 14px; margin-top: 12px;
+        }
+        .row-flex { display: flex; justify-content: space-between; align-items: center; }
+        .mt-2 { margin-top: 10px; }
+        .text-small { font-size: 12px; color: #64748b; }
+        .trade-list {
+            list-style: none; max-height: 210px; overflow-y: auto; margin-top: 6px;
+        }
+        .trade-item {
+            display: flex; justify-content: space-between; padding: 10px 0;
+            border-bottom: 1px solid #f1f5f9;
+        }
+        .long { color: #059669; font-weight: 600; }
+        .short { color: #dc2626; font-weight: 600; }
+        #chartContainer { height: 200px; margin-top: 8px; border-radius: 16px; overflow: hidden; }
+        .est-lots { font-size: 12px; color: #3b82f6; margin-top: 4px; font-weight: 500; }
+        .positive { color: #059669; }
+        .negative { color: #dc2626; }
+        .symbol-custom-input { margin-top: 8px; display: none; }
+    </style>
+</head>
+<body>
+    <div class="card row-flex" style="padding: 12px 16px;">
+        <span style="font-weight: 600;">👤 demo_user</span>
+        <span id="strategyStatus" class="status-badge stopped">⏸️ 已停止</span>
+    </div>
+
+    <div class="card">
+        <div class="card-title">⚙️ K线之王 · 策略配置</div>
+        <div class="grid-2">
+            <div>
+                <label>交易对</label>
+                <select id="symbolSelect" style="margin-bottom: 8px;">
+                    <option value="BTC-USDT-SWAP">BTC/USDT 永续</option>
+                    <option value="ETH-USDT-SWAP">ETH/USDT 永续</option>
+                    <option value="SOL-USDT-SWAP">SOL/USDT 永续</option>
+                    <option value="BNB-USDT-SWAP">BNB/USDT 永续</option>
+                    <option value="XRP-USDT-SWAP">XRP/USDT 永续</option>
+                    <option value="DOGE-USDT-SWAP">DOGE/USDT 永续</option>
+                    <option value="custom">其他 (手动输入)</option>
+                </select>
+                <div id="customSymbolContainer" class="symbol-custom-input">
+                    <input type="text" id="customSymbol" placeholder="输入交易对，如 LINK-USDT-SWAP">
+                </div>
+                <input type="hidden" id="symbol" value="BTC-USDT-SWAP">
+            </div>
+            <div>
+                <label>K线周期</label>
+                <select id="interval">
+                    <option value="15m">15分钟</option>
+                    <option value="30m" selected>30分钟</option>
+                    <option value="1h">1小时</option>
+                    <option value="2h">2小时</option>
+                    <option value="4h">4小时</option>
+                    <option value="6h">6小时</option>
+                    <option value="12h">12小时</option>
+                </select>
+            </div>
+            <div>
+                <label>杠杆 (1-100)</label>
+                <input type="number" id="leverage" min="1" max="100" value="10" step="1">
+            </div>
+            <div>
+                <label>交易金额 (USDT)</label>
+                <input type="number" id="amountUsdt" min="1" value="100" step="1">
+                <div id="lotEstimate" class="est-lots">≈ 0.0000 张</div>
+            </div>
+        </div>
+        <div class="row-flex" style="margin: 16px 0 4px;">
+            <div class="radio-group">
+                <label><input type="radio" name="marginMode" value="cross" checked> 全仓</label>
+                <label><input type="radio" name="marginMode" value="isolated"> 逐仓</label>
+            </div>
+            <button id="toggleStrategyBtn" style="width: 130px;">创建策略</button>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-title">📊 账户权益</div>
+        <div class="info-grid">
+            <div class="info-item">
+                <div class="info-label">总权益 (USDT)</div>
+                <div class="info-value" id="equity">10000.00</div>
+            </div>
+            <div class="info-item">
+                <div class="info-label">可用余额</div>
+                <div class="info-value" id="balance">10000.00</div>
+            </div>
+            <div class="info-item">
+                <div class="info-label">收益</div>
+                <div class="info-value" id="totalReturn">0.00%</div>
+            </div>
+        </div>
+
+        <div id="positionContainer" style="display: none;">
+            <div class="position-box">
+                <div class="row-flex">
+                    <span style="font-weight: 600;"><span id="positionSide" class="long">多头</span> · <span id="positionSize">0.0000</span> 张</span>
+                    <span class="text-small">开仓价 <span id="entryPrice">0.00</span></span>
+                </div>
+                <div class="row-flex mt-2">
+                    <span>标记价 <span id="markPrice">0.00</span></span>
+                    <span>未实现盈亏 <span id="unrealizedPnl" class="positive">0.00</span></span>
+                </div>
+            </div>
+        </div>
+        <div id="noPosition" class="text-small" style="padding: 12px 0;">暂无持仓</div>
+    </div>
+
+    <div class="card">
+        <div class="card-title">📈 实时K线</div>
+        <div id="chartContainer"></div>
+    </div>
+
+    <div class="card">
+        <div class="row-flex" style="margin-bottom: 6px;">
+            <span class="card-title" style="margin-bottom:0;">📋 最近交易</span>
+            <button id="exportBtn" class="btn-outline" style="width: 80px; padding: 8px 0;">导出</button>
+        </div>
+        <ul class="trade-list" id="tradeList">
+            <li style="text-align: center; color: #94a3b8; padding: 20px;">暂无交易记录</li>
+        </ul>
+    </div>
+
+    <script>
+        // 配置后端API地址（已替换为您的Railway域名）
+        const API_BASE = 'https://ooxoo-production.up.railway.app';
+        const USER_ID = 'demo_user';
+
+        let strategyActive = false;
+        let pollInterval = null;
+        let chart = null;
+        let candleSeries = null;
+        let currentMarkPrice = 50000;
+
+        const symbolSelect = document.getElementById('symbolSelect');
+        const customSymbolContainer = document.getElementById('customSymbolContainer');
+        const customSymbolInput = document.getElementById('customSymbol');
+        const symbolHidden = document.getElementById('symbol');
+
+        function updateSymbol() {
+            if (symbolSelect.value === 'custom') {
+                customSymbolContainer.style.display = 'block';
+                symbolHidden.value = customSymbolInput.value || 'CUSTOM-USDT-SWAP';
+            } else {
+                customSymbolContainer.style.display = 'none';
+                symbolHidden.value = symbolSelect.value;
+            }
+        }
+        symbolSelect.addEventListener('change', updateSymbol);
+        customSymbolInput.addEventListener('input', () => {
+            if (symbolSelect.value === 'custom') {
+                symbolHidden.value = customSymbolInput.value || 'CUSTOM-USDT-SWAP';
+            }
+        });
+        updateSymbol();
+
+        function initChart() {
+            const container = document.getElementById('chartContainer');
+            if (!container) return;
+            chart = LightweightCharts.createChart(container, {
+                width: container.clientWidth,
+                height: 200,
+                layout: { backgroundColor: '#ffffff', textColor: '#1e293b' },
+                grid: { vertLines: { visible: false }, horzLines: { visible: false } },
+                rightPriceScale: { borderVisible: false },
+                timeScale: { borderVisible: false, timeVisible: true, secondsVisible: false },
+            });
+            candleSeries = chart.addCandlestickSeries({
+                upColor: '#10b981', downColor: '#ef4444', borderVisible: false,
+                wickUpColor: '#10b981', wickDownColor: '#ef4444',
+            });
+        }
+
+        function updateChartData(klines) {
+            if (!candleSeries || !klines) return;
+            const adapted = klines.map(k => ({
+                time: k.time,
+                open: k.open,
+                high: k.high,
+                low: k.low,
+                close: k.close
+            }));
+            candleSeries.setData(adapted);
+        }
+
+        function estimateLots() {
+            const usdt = parseFloat(document.getElementById('amountUsdt').value) || 0;
+            const leverage = parseFloat(document.getElementById('leverage').value) || 1;
+            const price = currentMarkPrice || 1;
+            const lots = (usdt * leverage) / price;
+            document.getElementById('lotEstimate').innerText = `≈ ${lots.toFixed(4)} 张`;
+        }
+
+        async function fetchStatus() {
+            try {
+                const response = await fetch(`${API_BASE}/status?user=${USER_ID}`);
+                if (!response.ok) throw new Error('网络错误');
+                const data = await response.json();
+
+                if (data.markPrice) currentMarkPrice = data.markPrice;
+                estimateLots();
+
+                document.getElementById('equity').innerText = data.equity.toFixed(2);
+                document.getElementById('balance').innerText = data.balance.toFixed(2);
+
+                const totalReturn = data.totalReturn || 0;
+                const totalReturnPercent = (totalReturn * 100).toFixed(2) + '%';
+                document.getElementById('totalReturn').innerText = (totalReturn >= 0 ? '+' : '') + totalReturnPercent;
+                document.getElementById('totalReturn').className = totalReturn >= 0 ? 'positive' : 'negative';
+
+                const position = data.position;
+                if (position && position.size > 0) {
+                    document.getElementById('positionContainer').style.display = 'block';
+                    document.getElementById('noPosition').style.display = 'none';
+                    document.getElementById('positionSide').innerText = position.side === 'long' ? '多头' : '空头';
+                    document.getElementById('positionSide').className = position.side === 'long' ? 'long' : 'short';
+                    document.getElementById('positionSize').innerText = position.size.toFixed(4);
+                    document.getElementById('entryPrice').innerText = position.entryPrice.toFixed(2);
+                    document.getElementById('markPrice').innerText = position.markPrice.toFixed(2);
+                    const upnl = position.unrealizedPnl || 0;
+                    document.getElementById('unrealizedPnl').innerText = (upnl > 0 ? '+' : '') + upnl.toFixed(2);
+                    document.getElementById('unrealizedPnl').className = upnl >= 0 ? 'positive' : 'negative';
+                } else {
+                    document.getElementById('positionContainer').style.display = 'none';
+                    document.getElementById('noPosition').style.display = 'block';
+                }
+
+                const history = data.history || [];
+                const tradeList = document.getElementById('tradeList');
+                if (history.length === 0) {
+                    tradeList.innerHTML = '<li style="text-align: center; color: #94a3b8; padding: 20px;">暂无交易记录</li>';
+                } else {
+                    let html = '';
+                    history.slice(0, 10).forEach(t => {
+                        const sideClass = t.side === 'long' ? 'long' : 'short';
+                        const sideText = t.side === 'long' ? '开多' : '开空';
+                        const pnlText = t.pnl ? ` 盈亏: ${t.pnl > 0 ? '+' : ''}${t.pnl.toFixed(2)}` : '';
+                        html += `<li class="trade-item">
+                            <span><span class="${sideClass}">${sideText}</span> ${t.size.toFixed(4)}张 @ ${t.price.toFixed(2)}</span>
+                            <span class="text-small">${new Date(t.time).toLocaleTimeString()} ${pnlText}</span>
+                        </li>`;
+                    });
+                    tradeList.innerHTML = html;
+                }
+
+                if (data.klines) {
+                    updateChartData(data.klines);
+                }
+
+                if (data.strategyActive !== undefined) {
+                    strategyActive = data.strategyActive;
+                    const statusEl = document.getElementById('strategyStatus');
+                    const btn = document.getElementById('toggleStrategyBtn');
+                    if (strategyActive) {
+                        statusEl.className = 'status-badge running';
+                        statusEl.innerHTML = '▶️ 运行中';
+                        btn.innerText = '停止策略';
+                        btn.style.background = '#ef4444';
+                    } else {
+                        statusEl.className = 'status-badge stopped';
+                        statusEl.innerHTML = '⏸️ 已停止';
+                        btn.innerText = '创建策略';
+                        btn.style.background = '#3b82f6';
+                    }
+                }
+            } catch (error) {
+                console.error('状态获取失败', error);
+            }
+        }
+
+        async function saveConfig() {
+            const config = {
+                symbol: document.getElementById('symbol').value,
+                interval: document.getElementById('interval').value,
+                leverage: parseInt(document.getElementById('leverage').value),
+                amountUsdt: parseFloat(document.getElementById('amountUsdt').value),
+                marginMode: document.querySelector('input[name="marginMode"]:checked').value,
+                active: strategyActive
+            };
+            try {
+                await fetch(`${API_BASE}/config?user=${USER_ID}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(config)
+                });
+            } catch (error) {
+                alert('配置保存失败');
+            }
+        }
+
+        async function toggleStrategy() {
+            const newActive = !strategyActive;
+            try {
+                const response = await fetch(`${API_BASE}/control?user=${USER_ID}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ active: newActive })
+                });
+                if (!response.ok) throw new Error();
+                strategyActive = newActive;
+                await saveConfig();
+                fetchStatus();
+            } catch {
+                alert('操作失败');
+            }
+        }
+
+        async function exportData() {
+            try {
+                const response = await fetch(`${API_BASE}/export?user=${USER_ID}`);
+                const blob = await response.blob();
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `kline_king_${USER_ID}_${new Date().toISOString().slice(0,10)}.json`;
+                a.click();
+                URL.revokeObjectURL(url);
+            } catch {
+                alert('导出失败');
+            }
+        }
+
+        function bindAutoSave() {
+            const elements = ['interval', 'leverage', 'amountUsdt'];
+            elements.forEach(id => {
+                document.getElementById(id).addEventListener('change', () => {
+                    estimateLots();
+                    saveConfig();
+                });
+            });
+            symbolSelect.addEventListener('change', () => {
+                updateSymbol();
+                saveConfig();
+            });
+            customSymbolInput.addEventListener('input', () => {
+                updateSymbol();
+                saveConfig();
+            });
+            document.querySelectorAll('input[name="marginMode"]').forEach(r => {
+                r.addEventListener('change', saveConfig);
+            });
+            document.getElementById('amountUsdt').addEventListener('input', estimateLots);
+            document.getElementById('leverage').addEventListener('input', estimateLots);
+        }
+
+        window.addEventListener('load', () => {
+            initChart();
+            estimateLots();
+            fetchStatus();
+            pollInterval = setInterval(fetchStatus, 5000);
+            document.getElementById('toggleStrategyBtn').addEventListener('click', toggleStrategy);
+            document.getElementById('exportBtn').addEventListener('click', exportData);
+            bindAutoSave();
+        });
+
+        window.addEventListener('resize', () => {
+            if (chart) {
+                chart.resize(document.getElementById('chartContainer').clientWidth, 200);
+            }
+        });
+    </script>
+</body>
+</html>
