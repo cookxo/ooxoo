@@ -1,16 +1,29 @@
 const express = require('express');
-const TableStore = require('tablestore'); // 注意：这里不是解构赋值
+const TableStore = require('tablestore');
 const axios = require('axios');
 
 const app = express();
+
+// 允许所有跨域请求（关键！）
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  // 处理 OPTIONS 预检请求
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(200);
+  }
+  next();
+});
+
 app.use(express.json());
 
 // 表格存储客户端（从环境变量获取）
 const client = new TableStore.Client({
-  accessKeyId: process.env.ACCESS_KEY_ID,
-  secretAccessKey: process.env.ACCESS_KEY_SECRET,
-  endpoint: process.env.TABLE_STORE_ENDPOINT,
-  instancename: process.env.TABLE_STORE_INSTANCE
+  accessKeyId: process.env.ACCESS_KEY_ID || 'dummy',
+  secretAccessKey: process.env.ACCESS_KEY_SECRET || 'dummy',
+  endpoint: process.env.TABLE_STORE_ENDPOINT || 'dummy',
+  instancename: process.env.TABLE_STORE_INSTANCE || 'dummy'
 });
 
 const USER_TABLE = 'user_config';
@@ -305,6 +318,7 @@ app.post('/config', async (req, res) => {
     await saveUserConfig(userId, config);
     res.json({ success: true });
   } catch (err) {
+    console.error('保存配置失败', err);
     res.status(500).json({ error: '保存失败' });
   }
 });
@@ -318,6 +332,7 @@ app.post('/control', async (req, res) => {
     await saveUserConfig(userId, config);
     res.json({ success: true });
   } catch (err) {
+    console.error('控制失败', err);
     res.status(500).json({ error: '操作失败' });
   }
 });
@@ -332,6 +347,7 @@ app.get('/export', async (req, res) => {
     res.setHeader('Content-Type', 'application/json');
     res.send(JSON.stringify(exportData, null, 2));
   } catch (err) {
+    console.error('导出失败', err);
     res.status(500).json({ error: '导出失败' });
   }
 });
