@@ -1,7 +1,7 @@
 {
   "name": "kline-king-backend",
   "version": "1.0.0",
-  "description": "K线之王策略后端（多策略版）",
+  "description": "K线之王策略后端（多策略完整版）",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
