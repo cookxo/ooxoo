@@ -87,7 +87,15 @@ async function openPosition(strategy, account, side, kline) {
     margin: initialMargin,
     unrealizedPnl: 0
   };
-  if (marginMode === 'cross') account.balance -= initialMargin;
+
+  // 根据模式扣除保证金
+  if (marginMode === 'cross') {
+    // 全仓：扣除保证金（纳入整体占用）
+    account.balance -= initialMargin;
+  } else {
+    // 逐仓：同样扣除保证金，并记录保证金
+    account.balance -= initialMargin;
+  }
 
   account.position = position;
   account.history.push({ type: 'open', side, size, price, fee, time: now() });
@@ -107,8 +115,10 @@ async function closePosition(strategy, account, currentPrice) {
   const fee = size * closePrice * TAKER_FEE_RATE;
 
   if (position.marginMode === 'cross') {
+    // 全仓：返还保证金 + 盈亏 - 手续费
     account.balance += (size * position.entryPrice / position.leverage) + pnl - fee;
   } else {
+    // 逐仓：返还保证金 + 盈亏 - 手续费
     account.balance += position.margin + pnl - fee;
   }
 
@@ -184,7 +194,8 @@ setInterval(() => {
 }, 60 * 1000);
 
 // ==================== API 路由 ====================
-// 获取所有策略概览
+
+// 获取所有策略概览（包含最近交易记录）
 app.get('/strategies', (req, res) => {
   const userId = req.query.user || USER_ID;
   const strategies = userData[userId]?.strategies || {};
@@ -199,7 +210,8 @@ app.get('/strategies', (req, res) => {
     active: s.config.active || false,
     equity: s.account.equity,
     position: s.account.position,
-    markPrice: s.account.markPrice || 0
+    markPrice: s.account.markPrice || 0,
+    recentTrades: s.account.history.slice(-5) // 最近5条交易记录
   }));
   res.json(list);
 });
@@ -292,6 +304,37 @@ app.post('/strategy/:id/control', (req, res) => {
   if (!strategy) return res.status(404).json({ error: '策略不存在' });
   strategy.config.active = active;
   res.json({ success: true });
+});
+
+// 市价全平接口
+app.post('/strategy/:id/close', async (req, res) => {
+  const userId = req.query.user || USER_ID;
+  const { id } = req.params;
+  const strategy = userData[userId]?.strategies[id];
+  if (!strategy) return res.status(404).json({ error: '策略不存在' });
+
+  const account = strategy.account;
+  if (!account.position) return res.status(400).json({ error: '无持仓' });
+
+  // 获取当前价格（使用标记价格，如果没有则实时获取）
+  let currentPrice = account.markPrice;
+  if (!currentPrice || currentPrice <= 0) {
+    try {
+      const klines = await fetchKlines(strategy.config.symbol, '1m', 1);
+      if (klines && klines[0]) currentPrice = klines[0].close;
+    } catch (err) {
+      return res.status(500).json({ error: '无法获取价格' });
+    }
+  }
+  if (!currentPrice || currentPrice <= 0) return res.status(500).json({ error: '价格无效' });
+
+  try {
+    await closePosition(strategy, account, currentPrice);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('平仓失败', err);
+    res.status(500).json({ error: '平仓失败' });
+  }
 });
 
 // 导出单个策略数据
