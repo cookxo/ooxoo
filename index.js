@@ -79,13 +79,13 @@ async function openPosition(strategy, account, side, price, klineTime) {
 
   const fee = size * execPrice * TAKER_FEE_RATE;
   account.balance -= fee;
-  account.balance -= initialMargin; // 全仓/逐仓都扣除保证金
+  account.balance -= initialMargin; // 扣除保证金
 
   const position = {
     side,
     size,
     entryPrice: execPrice,
-    openTime: klineTime,
+    openTime: klineTime,      // 开仓时的K线时间（毫秒）
     leverage,
     marginMode,
     margin: initialMargin,
@@ -97,7 +97,7 @@ async function openPosition(strategy, account, side, price, klineTime) {
 }
 
 // 平仓
-async function closePosition(strategy, account, price) {
+async function closePosition(strategy, account, price, reason = '') {
   const position = account.position;
   if (!position) return null;
 
@@ -112,22 +112,24 @@ async function closePosition(strategy, account, price) {
 
   account.realizedPnl += pnl;
   account.totalReturn = account.realizedPnl / DEFAULT_BALANCE;
-  account.history.push({ type: 'close', side: position.side, size, price: execPrice, pnl, fee, time: now() });
+  account.history.push({ type: 'close', side: position.side, size, price: execPrice, pnl, fee, time: now(), reason });
   account.position = null;
   account.equity = account.balance;
   return pnl;
 }
 
-// 策略核心
+// 策略核心（每秒执行）
 async function runStrategy(strategy) {
   if (!strategy.config || !strategy.config.active) return;
 
   const { symbol, interval } = strategy.config;
-  const klines = await fetchKlines(symbol, interval, 2);
-  if (!klines || klines.length < 2) return;
+  const klines = await fetchKlines(symbol, interval, 3); // 取最近3根
+  if (!klines || klines.length < 3) return;
 
-  const prevKline = klines[0];      // 上一根已收盘K线
-  const currentKline = klines[1];   // 当前正在形成的K线
+  const currentKline = klines[klines.length - 1]; // 当前未收盘K线
+  const prevKline = klines[klines.length - 2];    // 上一根已收盘K线
+  const prevPrevKline = klines[klines.length - 3]; // 上上一根（用于趋势判断）
+
   const account = strategy.account;
   const nowMs = Date.now();
 
@@ -136,47 +138,58 @@ async function runStrategy(strategy) {
   const currentEndTime = currentKline.time + intervalMsVal;
   const timeToCloseMs = currentEndTime - nowMs; // 毫秒
 
-  // 严格在收盘前59秒内执行 (59000ms 到 0ms 之间)
+  // 严格在收盘前59秒内执行
   if (timeToCloseMs > 59000 || timeToCloseMs < 0) return;
 
   // 无持仓
   if (!account.position) {
-    if (!account.strategyState) account.strategyState = { nextAction: null };
-    if (account.strategyState.nextAction === null) {
-      account.strategyState.nextAction = prevKline.close > prevKline.open ? 'short' : 'long';
-    }
+    // 判断当前K线是否满足开仓条件
+    // 下跌趋势中的第一根阳线：当前K线为阳线，且上一根K线为阴线
+    const isBullReversal = (currentKline.close > currentKline.open) && (prevKline.close < prevKline.open);
+    // 上涨趋势中的第一根阴线：当前K线为阴线，且上一根K线为阳线
+    const isBearReversal = (currentKline.close < currentKline.open) && (prevKline.close > prevKline.open);
 
-    const isBull = prevKline.close > prevKline.open;
-    const isBear = prevKline.close < prevKline.open;
-
-    if (account.strategyState.nextAction === 'long' && isBull) {
-      await openPosition(strategy, account, 'long', prevKline.close, prevKline.time);
-      account.strategyState.nextAction = null;
-    } else if (account.strategyState.nextAction === 'short' && isBear) {
-      await openPosition(strategy, account, 'short', prevKline.close, prevKline.time);
-      account.strategyState.nextAction = null;
+    if (isBullReversal) {
+      // 在收盘前59秒买入做多
+      await openPosition(strategy, account, 'long', currentKline.close, currentKline.time);
+      account.strategyState = { lastAction: 'open', openKlineTime: currentKline.time };
+    } else if (isBearReversal) {
+      // 在收盘前59秒卖出做空
+      await openPosition(strategy, account, 'short', currentKline.close, currentKline.time);
+      account.strategyState = { lastAction: 'open', openKlineTime: currentKline.time };
     }
   } else {
-    // 有持仓
+    // 有持仓，检查是否到了平仓时机（即开仓后的第二根K线）
     const position = account.position;
-    const isBull = prevKline.close > prevKline.open;
-    const isBear = prevKline.close < prevKline.open;
+    const openKlineTime = account.strategyState?.openKlineTime;
 
-    if (position.side === 'long') {
-      if (isBull) {
-        await closePosition(strategy, account, prevKline.close);
-        account.strategyState = { nextAction: 'short' };
-      } else if (isBear) {
-        await closePosition(strategy, account, prevKline.close);
-        await openPosition(strategy, account, 'short', prevKline.close, prevKline.time);
-      }
-    } else if (position.side === 'short') {
-      if (isBear) {
-        await closePosition(strategy, account, prevKline.close);
-        account.strategyState = { nextAction: 'long' };
-      } else if (isBull) {
-        await closePosition(strategy, account, prevKline.close);
-        await openPosition(strategy, account, 'long', prevKline.close, prevKline.time);
+    // 判断当前K线是否是开仓后的第二根K线
+    // 开仓发生在第一根K线收盘前59秒，现在需要等第二根K线收盘前59秒平仓
+    // 如何判断第二根K线？当前K线的时间 > 开仓时间 + 一个周期，并且我们还没有平仓
+    if (openKlineTime && (currentKline.time >= openKlineTime + intervalMsVal)) {
+      // 根据上一根K线（即开仓后的第一根已收盘K线）的阴阳决定操作
+      if (position.side === 'long') {
+        if (prevKline.close > prevKline.open) {
+          // 第二根收阳 → 止盈平多
+          await closePosition(strategy, account, currentKline.close, 'take profit');
+          account.strategyState = { nextAction: 'short' }; // 等待阴线做空
+        } else if (prevKline.close < prevKline.open) {
+          // 第二根收阴 → 止损平多，并反手做空
+          await closePosition(strategy, account, currentKline.close, 'stop loss');
+          await openPosition(strategy, account, 'short', currentKline.close, currentKline.time);
+          account.strategyState = { lastAction: 'open', openKlineTime: currentKline.time };
+        }
+      } else if (position.side === 'short') {
+        if (prevKline.close < prevKline.open) {
+          // 第二根收阴 → 止盈平空
+          await closePosition(strategy, account, currentKline.close, 'take profit');
+          account.strategyState = { nextAction: 'long' };
+        } else if (prevKline.close > prevKline.open) {
+          // 第二根收阳 → 止损平空，并反手做多
+          await closePosition(strategy, account, currentKline.close, 'stop loss');
+          await openPosition(strategy, account, 'long', currentKline.close, currentKline.time);
+          account.strategyState = { lastAction: 'open', openKlineTime: currentKline.time };
+        }
       }
     }
   }
@@ -193,7 +206,7 @@ async function runStrategy(strategy) {
   }
 }
 
-// 每秒执行一次，确保捕捉到收盘前59秒
+// 每秒执行一次
 setInterval(() => {
   for (const userId in userData) {
     for (const id in userData[userId].strategies) {
@@ -202,7 +215,7 @@ setInterval(() => {
   }
 }, 1000);
 
-// API 路由（与之前相同，略）
+// API 路由（与之前相同，略，但保证返回完整字段）
 app.get('/strategies', (req, res) => {
   const userId = req.query.user || USER_ID;
   const strategies = userData[userId]?.strategies || {};
@@ -249,7 +262,7 @@ app.post('/strategy', (req, res) => {
       realizedPnl: 0,
       totalReturn: 0,
       markPrice: 0,
-      strategyState: { nextAction: null }
+      strategyState: {}
     }
   };
   userData[userId].strategies[strategyId] = newStrategy;
@@ -310,7 +323,7 @@ app.post('/strategy/:id/close', async (req, res) => {
   }
   if (!currentPrice) return res.status(500).json({ error: '无法获取价格' });
 
-  await closePosition(strategy, account, currentPrice);
+  await closePosition(strategy, account, currentPrice, 'manual');
   res.json({ success: true });
 });
 
