@@ -54,7 +54,10 @@
             display: flex; justify-content: space-between; padding: 6px 0;
             border-bottom: 1px solid #2d3440; font-size: 12px;
         }
-        .chart-container { height: 200px; margin: 12px 0; border-radius: 16px; overflow: hidden; }
+        .chart-container {
+            height: 200px; margin: 12px 0; border-radius: 16px; overflow: hidden;
+            display: flex; align-items: center; justify-content: center; background: #0f1420;
+        }
         .positive { color: #8ce99a; }
         .negative { color: #f7a8a8; }
     </style>
@@ -119,7 +122,6 @@
     <div id="strategy-list"></div>
 
     <script>
-        // ✅ 您的域名已正确设置，无需任何修改
         const API_BASE = 'https://ooxoo-production.up.railway.app';
         const USER_ID = 'demo_user';
 
@@ -218,26 +220,21 @@
                     </div>
                 `;
 
-                // 持仓详情（完整保留）
-                let positionHtml = '';
-                if (pos) {
-                    positionHtml = `
-                        <div class="price-row" style="margin:8px 0;">
-                            <div class="price-item"><span class="price-label">收益额</span><span class="price-value ${pos.unrealizedPnl >= 0 ? 'positive' : 'negative'}">${(pos.unrealizedPnl || 0).toFixed(2)}</span></div>
-                            <div class="price-item"><span class="price-label">收益率</span><span class="price-value ${pos.unrealizedPnl >= 0 ? 'positive' : 'negative'}">${((pos.unrealizedPnl / (pos.size * pos.entryPrice / pos.leverage) * 100) || 0).toFixed(2)}%</span></div>
-                            <div class="price-item"><span class="price-label">持仓量</span><span class="price-value">${(pos.size * pos.entryPrice).toFixed(2)}</span></div>
-                            <div class="price-item"><span class="price-label">保证金</span><span class="price-value">${(pos.margin || 0).toFixed(2)}</span></div>
-                            <div class="price-item"><span class="price-label">杠杆</span><span class="price-value">${pos.leverage}x</span></div>
-                        </div>
-                        <div class="price-row">
-                            <div class="price-item"><span class="price-label">开仓均价</span><span class="price-value">${pos.entryPrice.toFixed(2)}</span></div>
-                            <div class="price-item"><span class="price-label">标记价格</span><span class="price-value">${(s.markPrice || 0).toFixed(2)}</span></div>
-                            <div class="price-item"><span class="price-label">预估强平价</span><span class="price-value">${(pos.entryPrice * (1 - 0.05)).toFixed(2)}</span></div>
-                        </div>
-                    `;
-                } else {
-                    positionHtml = '<div class="price-row" style="justify-content:center; color:#8a94a8;">无持仓</div>';
-                }
+                // 持仓详情（无论有无持仓都显示框架，无持仓时数值为0）
+                let positionHtml = `
+                    <div class="price-row" style="margin:8px 0;">
+                        <div class="price-item"><span class="price-label">收益额</span><span class="price-value">${pos ? (pos.unrealizedPnl || 0).toFixed(2) : '0.00'}</span></div>
+                        <div class="price-item"><span class="price-label">收益率</span><span class="price-value">${pos ? ((pos.unrealizedPnl / (pos.size * pos.entryPrice / pos.leverage) * 100) || 0).toFixed(2) : '0.00'}%</span></div>
+                        <div class="price-item"><span class="price-label">持仓量</span><span class="price-value">${pos ? (pos.size * pos.entryPrice).toFixed(2) : '0.00'}</span></div>
+                        <div class="price-item"><span class="price-label">保证金</span><span class="price-value">${pos ? (pos.margin || 0).toFixed(2) : '0.00'}</span></div>
+                        <div class="price-item"><span class="price-label">杠杆</span><span class="price-value">${pos ? pos.leverage : s.leverage}x</span></div>
+                    </div>
+                    <div class="price-row">
+                        <div class="price-item"><span class="price-label">开仓均价</span><span class="price-value">${pos ? pos.entryPrice.toFixed(2) : '0.00'}</span></div>
+                        <div class="price-item"><span class="price-label">标记价格</span><span class="price-value">${(s.markPrice || 0).toFixed(2)}</span></div>
+                        <div class="price-item"><span class="price-label">预估强平价</span><span class="price-value">${pos ? (pos.entryPrice * (1 - 0.05)).toFixed(2) : '0.00'}</span></div>
+                    </div>
+                `;
 
                 const chartId = `chart-${s.id}`;
                 const chartHtml = `<div id="${chartId}" class="chart-container"></div>`;
@@ -275,10 +272,18 @@
             try {
                 const res = await fetch(`${API_BASE}/strategy/${strategyId}?user=${USER_ID}`);
                 const data = await res.json();
+                const container = document.getElementById(chartId);
                 if (data.klines && data.klines.length) {
                     setTimeout(() => renderChart(chartId, data.klines), 200);
+                } else {
+                    // 无K线数据时显示提示
+                    if (container) container.innerHTML = '<div style="color:#8a94a8;">暂无K线数据</div>';
                 }
-            } catch (err) {}
+            } catch (err) {
+                console.error('K线加载失败', err);
+                const container = document.getElementById(chartId);
+                if (container) container.innerHTML = '<div style="color:#f7a8a8;">加载失败</div>';
+            }
         }
 
         function renderChart(containerId, klines) {
@@ -286,8 +291,11 @@
             if (!container) return;
             container.style.width = '100%';
             container.style.height = '200px';
-            container.innerHTML = '';
-            if (typeof LightweightCharts === 'undefined') return;
+            container.innerHTML = ''; // 清空提示
+            if (typeof LightweightCharts === 'undefined') {
+                container.innerHTML = '<div style="color:#f7a8a8;">图表库加载失败</div>';
+                return;
+            }
 
             try {
                 const chart = LightweightCharts.createChart(container, {
@@ -329,7 +337,10 @@
 
                 chart.timeScale().fitContent();
                 new ResizeObserver(() => chart.resize(container.clientWidth, 200)).observe(container);
-            } catch (err) {}
+            } catch (err) {
+                console.error('图表绘制错误', err);
+                container.innerHTML = '<div style="color:#f7a8a8;">图表绘制失败</div>';
+            }
         }
 
         function calculateEMA(data, period) {
