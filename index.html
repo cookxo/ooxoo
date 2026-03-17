@@ -75,7 +75,10 @@
     <div class="card">
         <div class="title">➕ 新建策略</div>
         <div class="grid-2">
-            <div><label>名称</label><input type="text" id="newName" placeholder="可选"></div>
+            <div>
+                <label>名称</label>
+                <input type="text" id="newName" placeholder="可选">
+            </div>
             <div>
                 <label>交易对</label>
                 <select id="newSymbolSelect" style="margin-bottom: 8px;">
@@ -87,13 +90,38 @@
                     <option value="DOGE-USDT-SWAP">DOGE/USDT 永续</option>
                     <option value="custom">其他 (手动输入)</option>
                 </select>
-                <div id="customSymbolContainer" style="display: none;"><input type="text" id="customSymbol" placeholder="如 LINK-USDT-SWAP"></div>
+                <div id="customSymbolContainer" style="display: none;">
+                    <input type="text" id="customSymbol" placeholder="如 LINK-USDT-SWAP">
+                </div>
                 <input type="hidden" id="newSymbol" value="BTC-USDT-SWAP">
             </div>
-            <div><label>周期</label><select id="newInterval">...（同上）</select></div>
-            <div><label>杠杆</label><input type="number" id="newLeverage" min="1" max="100" value="10" step="1"></div>
-            <div><label>金额 (USDT)</label><input type="number" id="newAmount" min="1" value="100" step="1"></div>
-            <div><label>模式</label><div style="display: flex; gap: 16px;"><label><input type="radio" name="newMarginMode" value="cross" checked> 全仓</label><label><input type="radio" name="newMarginMode" value="isolated"> 逐仓</label></div></div>
+            <div>
+                <label>周期</label>
+                <select id="newInterval">
+                    <option value="15m">15分钟</option>
+                    <option value="30m" selected>30分钟</option>
+                    <option value="1h">1小时</option>
+                    <option value="2h">2小时</option>
+                    <option value="4h">4小时</option>
+                    <option value="6h">6小时</option>
+                    <option value="12h">12小时</option>
+                </select>
+            </div>
+            <div>
+                <label>杠杆</label>
+                <input type="number" id="newLeverage" min="1" max="100" value="10" step="1">
+            </div>
+            <div>
+                <label>金额 (USDT)</label>
+                <input type="number" id="newAmount" min="1" value="100" step="1">
+            </div>
+            <div>
+                <label>模式</label>
+                <div style="display: flex; gap: 16px;">
+                    <label><input type="radio" name="newMarginMode" value="cross" checked> 全仓</label>
+                    <label><input type="radio" name="newMarginMode" value="isolated"> 逐仓</label>
+                </div>
+            </div>
         </div>
         <button id="createBtn" style="margin-top:12px;">创建策略</button>
     </div>
@@ -101,7 +129,7 @@
     <div id="strategy-list"></div>
 
     <script>
-        const API_BASE = 'https://ooxoo-production.up.railway.app'; // 替换为你的域名
+        const API_BASE = 'https://ooxoo-production.up.railway.app'; // ⚠️ 请替换为您的Railway域名
         const USER_ID = 'demo_user';
 
         // 交易对切换逻辑
@@ -190,7 +218,7 @@
                     </div>
                 `;
 
-                // 资金总额和策略收益率（新增）
+                // 资金总额和策略收益率
                 const strategyReturn = ((s.equity - 10000) / 10000 * 100).toFixed(2);
                 const totalFundsHtml = `
                     <div class="price-row" style="margin:8px 0;">
@@ -199,7 +227,7 @@
                     </div>
                 `;
 
-                // 持仓详情（如果有）
+                // 持仓详情
                 let positionHtml = '';
                 if (pos) {
                     positionHtml = `
@@ -220,11 +248,9 @@
                     positionHtml = '<div class="price-row" style="justify-content:center; color:#8a94a8;">无持仓</div>';
                 }
 
-                // K线图容器（后续会绘制EMA和VOL）
                 const chartId = `chart-${s.id}`;
                 const chartHtml = `<div id="${chartId}" class="chart-container"></div>`;
 
-                // 操作按钮
                 const buttonsHtml = `
                     <div class="row" style="margin-top:12px; gap:8px;">
                         <button class="small ${s.active ? 'red' : 'green'}" onclick="toggleStrategy('${s.id}', ${!s.active})" style="flex:1;">${s.active ? '停止' : '启动'}</button>
@@ -233,7 +259,6 @@
                     </div>
                 `;
 
-                // 交易记录
                 let tradesHtml = '<div class="price-label" style="margin:8px 0 4px;">所有交易记录</div><ul class="trade-list">';
                 if (s.history && s.history.length) {
                     s.history.slice().reverse().forEach(t => {
@@ -281,21 +306,19 @@
                     timeScale: { borderColor: '#2d3440' },
                 });
 
-                // 主K线图
                 const candleSeries = chart.addCandlestickSeries({
                     upColor: '#8ce99a', downColor: '#f7a8a8', borderVisible: false,
                     wickUpColor: '#8ce99a', wickDownColor: '#f7a8a8',
                 });
 
-                // 计算简单EMA（示例EMA9）
+                // EMA 9
                 const closes = klines.map(k => k.close);
                 const ema9 = calculateEMA(closes, 9);
                 const emaData = klines.map((k, i) => ({ time: Math.floor(k.time / 1000), value: ema9[i] })).filter(d => d.value !== undefined);
-
                 const emaSeries = chart.addLineSeries({ color: '#f0b90b', lineWidth: 2 });
                 emaSeries.setData(emaData);
 
-                // 成交量子图（新建一个轴）
+                // 成交量
                 const volumeSeries = chart.addHistogramSeries({
                     color: '#4caf50',
                     priceFormat: { type: 'volume' },
@@ -319,7 +342,6 @@
             } catch (err) {}
         }
 
-        // 简单EMA计算
         function calculateEMA(data, period) {
             const k = 2 / (period + 1);
             let ema = [];
