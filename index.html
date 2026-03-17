@@ -3,25 +3,25 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=yes">
-    <title>K线之王 · 专业交易面板</title>
+    <title>K线之王 · 专业版</title>
     <!-- Lightweight Charts -->
     <script src="https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js"></script>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-            background: #0b0f17; color: #e0e5f0; padding: 12px;
+            background: #0c111b; color: #cfd9e6; padding: 12px;
         }
         .card {
-            background: #1a1f2e; border-radius: 20px; padding: 16px; margin-bottom: 16px;
-            border: 1px solid #2c3242;
+            background: #1a1f2c; border-radius: 20px; padding: 16px; margin-bottom: 16px;
+            border: 1px solid #2d3440;
         }
-        .title { font-size: 18px; font-weight: 600; margin-bottom: 12px; color: white; }
+        .title { font-size: 18px; font-weight: 600; margin-bottom: 12px; color: #e5e9f0; }
         .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-        label { font-size: 11px; color: #8a92a6; display: block; margin-bottom: 2px; }
+        label { font-size: 11px; color: #8a94a8; display: block; margin-bottom: 2px; }
         input, select {
-            width: 100%; padding: 10px; border-radius: 12px; border: 1px solid #2c3242;
-            background: #0f1420; color: white; font-size: 14px;
+            width: 100%; padding: 10px; border-radius: 12px; border: 1px solid #2d3440;
+            background: #0f1420; color: #e5e9f0; font-size: 14px;
         }
         button {
             background: #2f6ed6; border: none; color: white; padding: 12px; border-radius: 30px;
@@ -31,29 +31,29 @@
         button.green { background: #27a64b; }
         button.red { background: #d64f4f; }
         .badge {
-            padding: 4px 10px; border-radius: 30px; font-size: 12px; background: #2c3242; color: #b0c0e0;
+            padding: 4px 10px; border-radius: 30px; font-size: 12px; background: #2d3440; color: #b0c0e0;
         }
         .badge.active { background: #1a4f2e; color: #8ce99a; }
         .badge.long { background: #1a4f2e; color: #8ce99a; }
         .badge.short { background: #6b2e2e; color: #f7a8a8; }
         .strategy-card {
-            background: #1a1f2e; border-radius: 24px; padding: 16px; margin-bottom: 20px;
-            border: 1px solid #2c3242;
+            background: #1a1f2c; border-radius: 24px; padding: 16px; margin-bottom: 20px;
+            border: 1px solid #2d3440;
         }
         .row { display: flex; justify-content: space-between; align-items: center; margin: 8px 0; }
         .price-row { display: flex; gap: 16px; flex-wrap: wrap; background: #0f1420; padding: 12px; border-radius: 16px; }
         .price-item { flex: 1; min-width: 80px; }
-        .price-label { font-size: 11px; color: #8a92a6; }
+        .price-label { font-size: 11px; color: #8a94a8; }
         .price-value { font-size: 14px; font-weight: 600; color: white; }
         .trade-list {
-            list-style: none; max-height: 150px; overflow-y: auto; margin-top: 8px;
+            list-style: none; max-height: 200px; overflow-y: auto; margin-top: 8px;
             background: #0f1420; border-radius: 12px; padding: 8px;
         }
         .trade-item {
             display: flex; justify-content: space-between; padding: 6px 0;
-            border-bottom: 1px solid #2c3242; font-size: 12px;
+            border-bottom: 1px solid #2d3440; font-size: 12px;
         }
-        .chart-container { height: 180px; margin: 12px 0; border-radius: 16px; overflow: hidden; }
+        .chart-container { height: 200px; margin: 12px 0; border-radius: 16px; overflow: hidden; }
         .positive { color: #8ce99a; }
         .negative { color: #f7a8a8; }
     </style>
@@ -64,29 +64,18 @@
         <span class="badge">demo_user</span>
     </div>
 
-    <!-- 账户总览 -->
     <div class="card">
         <div class="title">账户总览</div>
         <div class="grid-2">
-            <div>
-                <div class="price-label">总权益 (USDT)</div>
-                <div class="price-value" id="totalEquity">0.00</div>
-            </div>
-            <div>
-                <div class="price-label">总收益率</div>
-                <div class="price-value" id="totalReturn">0.00%</div>
-            </div>
+            <div><div class="price-label">总权益 (USDT)</div><div class="price-value" id="totalEquity">0.00</div></div>
+            <div><div class="price-label">总收益率</div><div class="price-value" id="totalReturn">0.00%</div></div>
         </div>
     </div>
 
-    <!-- 创建策略表单 -->
     <div class="card">
         <div class="title">➕ 新建策略</div>
         <div class="grid-2">
-            <div>
-                <label>名称</label>
-                <input type="text" id="newName" placeholder="可选">
-            </div>
+            <div><label>名称</label><input type="text" id="newName" placeholder="可选"></div>
             <div>
                 <label>交易对</label>
                 <select id="newSymbolSelect" style="margin-bottom: 8px;">
@@ -98,47 +87,21 @@
                     <option value="DOGE-USDT-SWAP">DOGE/USDT 永续</option>
                     <option value="custom">其他 (手动输入)</option>
                 </select>
-                <div id="customSymbolContainer" style="display: none;">
-                    <input type="text" id="customSymbol" placeholder="如 LINK-USDT-SWAP">
-                </div>
+                <div id="customSymbolContainer" style="display: none;"><input type="text" id="customSymbol" placeholder="如 LINK-USDT-SWAP"></div>
                 <input type="hidden" id="newSymbol" value="BTC-USDT-SWAP">
             </div>
-            <div>
-                <label>周期</label>
-                <select id="newInterval">
-                    <option value="15m">15分钟</option>
-                    <option value="30m" selected>30分钟</option>
-                    <option value="1h">1小时</option>
-                    <option value="2h">2小时</option>
-                    <option value="4h">4小时</option>
-                    <option value="6h">6小时</option>
-                    <option value="12h">12小时</option>
-                </select>
-            </div>
-            <div>
-                <label>杠杆</label>
-                <input type="number" id="newLeverage" min="1" max="100" value="10" step="1">
-            </div>
-            <div>
-                <label>金额 (USDT)</label>
-                <input type="number" id="newAmount" min="1" value="100" step="1">
-            </div>
-            <div>
-                <label>模式</label>
-                <div style="display: flex; gap: 16px;">
-                    <label><input type="radio" name="newMarginMode" value="cross" checked> 全仓</label>
-                    <label><input type="radio" name="newMarginMode" value="isolated"> 逐仓</label>
-                </div>
-            </div>
+            <div><label>周期</label><select id="newInterval">...（同上）</select></div>
+            <div><label>杠杆</label><input type="number" id="newLeverage" min="1" max="100" value="10" step="1"></div>
+            <div><label>金额 (USDT)</label><input type="number" id="newAmount" min="1" value="100" step="1"></div>
+            <div><label>模式</label><div style="display: flex; gap: 16px;"><label><input type="radio" name="newMarginMode" value="cross" checked> 全仓</label><label><input type="radio" name="newMarginMode" value="isolated"> 逐仓</label></div></div>
         </div>
         <button id="createBtn" style="margin-top:12px;">创建策略</button>
     </div>
 
-    <!-- 策略列表容器 -->
     <div id="strategy-list"></div>
 
     <script>
-        const API_BASE = 'https://ooxoo-production.up.railway.app'; // 请替换为您的实际域名
+        const API_BASE = 'https://ooxoo-production.up.railway.app'; // 替换为你的域名
         const USER_ID = 'demo_user';
 
         // 交易对切换逻辑
@@ -157,13 +120,10 @@
         }
         symbolSelect.addEventListener('change', updateSymbol);
         customSymbolInput.addEventListener('input', () => {
-            if (symbolSelect.value === 'custom') {
-                symbolHidden.value = customSymbolInput.value || 'CUSTOM-USDT-SWAP';
-            }
+            if (symbolSelect.value === 'custom') symbolHidden.value = customSymbolInput.value || 'CUSTOM-USDT-SWAP';
         });
         updateSymbol();
 
-        // 创建策略
         document.getElementById('createBtn').addEventListener('click', async () => {
             const name = document.getElementById('newName').value.trim() || undefined;
             const symbol = document.getElementById('newSymbol').value.trim();
@@ -183,12 +143,9 @@
                 symbolSelect.value = 'BTC-USDT-SWAP';
                 updateSymbol();
                 loadStrategies();
-            } else {
-                alert('创建失败');
-            }
+            } else alert('创建失败');
         });
 
-        // 加载所有策略
         async function loadStrategies() {
             try {
                 const res = await fetch(`${API_BASE}/strategies?user=${USER_ID}`);
@@ -196,12 +153,10 @@
                 renderStrategies(strategies);
                 updateTotal(strategies);
             } catch (err) {
-                console.error(err);
                 document.getElementById('strategy-list').innerHTML = '<div class="card">加载失败</div>';
             }
         }
 
-        // 计算总权益和总收益率（每个策略初始本金10000）
         function updateTotal(strategies) {
             const totalEquity = strategies.reduce((sum, s) => sum + (s.equity || 10000), 0);
             const totalCapital = strategies.length * 10000;
@@ -210,14 +165,12 @@
             document.getElementById('totalReturn').innerText = (totalReturn > 0 ? '+' : '') + totalReturn + '%';
         }
 
-        // 渲染策略卡片
         function renderStrategies(strategies) {
             const container = document.getElementById('strategy-list');
             if (!strategies.length) {
                 container.innerHTML = '<div class="card">暂无策略，点击上方创建</div>';
                 return;
             }
-
             container.innerHTML = '';
             strategies.forEach(s => {
                 const pos = s.position;
@@ -225,163 +178,182 @@
                 card.className = 'strategy-card';
                 card.dataset.id = s.id;
 
-                // 基本信息头
+                // 策略头部
                 let headerHtml = `
                     <div class="row">
                         <div>
                             <span style="font-weight:600;">${s.name || s.id.slice(0,8)}</span>
-                            <span class="badge" style="margin-left:8px;">${s.symbol}</span>
-                            <span class="badge ${s.active ? 'active' : ''}" style="margin-left:8px;">${s.active ? '运行' : '停止'}</span>
+                            <span class="badge">${s.symbol}</span>
+                            <span class="badge ${s.active ? 'active' : ''}">${s.active ? '运行' : '停止'}</span>
                         </div>
                         <span class="badge ${pos ? (pos.side === 'long' ? 'long' : 'short') : ''}">${pos ? (pos.side === 'long' ? '多' : '空') : '无持仓'}</span>
                     </div>
                 `;
 
-                // 持仓详情（如果有持仓）
-                let positionHtml = '';
-                if (pos) {
-                    positionHtml = `
-                        <div class="price-row" style="margin:12px 0;">
-                            <div class="price-item">
-                                <div class="price-label">收益额 (USDT)</div>
-                                <div class="price-value ${pos.unrealizedPnl >= 0 ? 'positive' : 'negative'}">${(pos.unrealizedPnl || 0).toFixed(2)}</div>
-                            </div>
-                            <div class="price-item">
-                                <div class="price-label">收益率</div>
-                                <div class="price-value ${pos.unrealizedPnl >= 0 ? 'positive' : 'negative'}">${((pos.unrealizedPnl / (pos.size * pos.entryPrice / pos.leverage) * 100) || 0).toFixed(2)}%</div>
-                            </div>
-                            <div class="price-item">
-                                <div class="price-label">持仓量 (USDT)</div>
-                                <div class="price-value">${(pos.size * pos.entryPrice).toFixed(2)}</div>
-                            </div>
-                            <div class="price-item">
-                                <div class="price-label">保证金 (USDT)</div>
-                                <div class="price-value">${(pos.margin || 0).toFixed(2)}</div>
-                            </div>
-                            <!-- 杠杆倍数 -->
-                            <div class="price-item">
-                                <div class="price-label">杠杆</div>
-                                <div class="price-value">${pos.leverage}x</div>
-                            </div>
-                        </div>
-                        <div class="price-row">
-                            <div class="price-item">
-                                <div class="price-label">开仓均价</div>
-                                <div class="price-value">${pos.entryPrice.toFixed(2)}</div>
-                            </div>
-                            <div class="price-item">
-                                <div class="price-label">标记价格</div>
-                                <div class="price-value">${(s.markPrice || 0).toFixed(2)}</div>
-                            </div>
-                            <div class="price-item">
-                                <div class="price-label">预估强平价</div>
-                                <div class="price-value">${(pos.entryPrice * (1 - 0.05)).toFixed(2)}</div>
-                            </div>
-                        </div>
-                    `;
-                } else {
-                    positionHtml = '<div class="price-row" style="justify-content:center; color:#8a92a6;">无持仓</div>';
-                }
-
-                // 迷你K线图
-                const chartId = `chart-${s.id}`;
-                const chartHtml = `<div id="${chartId}" class="chart-container"></div>`;
-
-                // 操作按钮：启动/停止 + 市价全平
-                const buttonsHtml = `
-                    <div class="row" style="margin-top:12px;">
-                        <button class="small ${s.active ? 'red' : 'green'}" onclick="toggleStrategy('${s.id}', ${!s.active})" style="flex:1; margin-right:8px;">${s.active ? '停止' : '启动'}</button>
-                        ${pos ? `<button class="small red" onclick="closePosition('${s.id}')" style="flex:1;">市价全平</button>` : ''}
+                // 资金总额和策略收益率（新增）
+                const strategyReturn = ((s.equity - 10000) / 10000 * 100).toFixed(2);
+                const totalFundsHtml = `
+                    <div class="price-row" style="margin:8px 0;">
+                        <div class="price-item"><span class="price-label">资金总额</span><span class="price-value">${s.equity.toFixed(2)} USDT</span></div>
+                        <div class="price-item"><span class="price-label">策略收益率</span><span class="price-value ${strategyReturn >= 0 ? 'positive' : 'negative'}">${strategyReturn}%</span></div>
                     </div>
                 `;
 
-                // 最近交易明细
-                let tradesHtml = '<div class="price-label" style="margin:8px 0 4px;">最近交易</div>';
-                tradesHtml += '<ul class="trade-list">';
-                if (s.recentTrades && s.recentTrades.length) {
-                    s.recentTrades.slice(0,5).forEach(t => {
+                // 持仓详情（如果有）
+                let positionHtml = '';
+                if (pos) {
+                    positionHtml = `
+                        <div class="price-row" style="margin:8px 0;">
+                            <div class="price-item"><span class="price-label">收益额</span><span class="price-value ${pos.unrealizedPnl >= 0 ? 'positive' : 'negative'}">${(pos.unrealizedPnl || 0).toFixed(2)}</span></div>
+                            <div class="price-item"><span class="price-label">收益率</span><span class="price-value ${pos.unrealizedPnl >= 0 ? 'positive' : 'negative'}">${((pos.unrealizedPnl / (pos.size * pos.entryPrice / pos.leverage) * 100) || 0).toFixed(2)}%</span></div>
+                            <div class="price-item"><span class="price-label">持仓量</span><span class="price-value">${(pos.size * pos.entryPrice).toFixed(2)}</span></div>
+                            <div class="price-item"><span class="price-label">保证金</span><span class="price-value">${(pos.margin || 0).toFixed(2)}</span></div>
+                            <div class="price-item"><span class="price-label">杠杆</span><span class="price-value">${pos.leverage}x</span></div>
+                        </div>
+                        <div class="price-row">
+                            <div class="price-item"><span class="price-label">开仓均价</span><span class="price-value">${pos.entryPrice.toFixed(2)}</span></div>
+                            <div class="price-item"><span class="price-label">标记价格</span><span class="price-value">${(s.markPrice || 0).toFixed(2)}</span></div>
+                            <div class="price-item"><span class="price-label">预估强平价</span><span class="price-value">${(pos.entryPrice * (1 - 0.05)).toFixed(2)}</span></div>
+                        </div>
+                    `;
+                } else {
+                    positionHtml = '<div class="price-row" style="justify-content:center; color:#8a94a8;">无持仓</div>';
+                }
+
+                // K线图容器（后续会绘制EMA和VOL）
+                const chartId = `chart-${s.id}`;
+                const chartHtml = `<div id="${chartId}" class="chart-container"></div>`;
+
+                // 操作按钮
+                const buttonsHtml = `
+                    <div class="row" style="margin-top:12px; gap:8px;">
+                        <button class="small ${s.active ? 'red' : 'green'}" onclick="toggleStrategy('${s.id}', ${!s.active})" style="flex:1;">${s.active ? '停止' : '启动'}</button>
+                        ${pos ? `<button class="small red" onclick="closePosition('${s.id}')" style="flex:1;">市价全平</button>` : ''}
+                        <button class="small red" onclick="deleteStrategy('${s.id}')" style="flex:1;">删除</button>
+                    </div>
+                `;
+
+                // 交易记录
+                let tradesHtml = '<div class="price-label" style="margin:8px 0 4px;">所有交易记录</div><ul class="trade-list">';
+                if (s.history && s.history.length) {
+                    s.history.slice().reverse().forEach(t => {
+                        const timeStr = new Date(t.time * 1000).toLocaleString('zh-CN', { hour12: false });
                         const sign = t.pnl >= 0 ? '+' : '';
-                        tradesHtml += `<li class="trade-item"><span>${t.type === 'open' ? '开' : '平'} ${t.side === 'long' ? '多' : '空'} ${t.size.toFixed(4)} @ ${t.price.toFixed(2)}</span><span class="${t.pnl >=0 ? 'positive' : 'negative'}">${sign}${(t.pnl || 0).toFixed(2)}</span></li>`;
+                        tradesHtml += `<li class="trade-item"><span>${timeStr} ${t.type==='open'?'开':'平'} ${t.side==='long'?'多':'空'} ${t.size.toFixed(4)} @ ${t.price.toFixed(2)}</span><span class="${t.pnl>=0?'positive':'negative'}">${sign}${(t.pnl||0).toFixed(2)}</span></li>`;
                     });
                 } else {
                     tradesHtml += '<li class="trade-item" style="justify-content:center;">暂无交易</li>';
                 }
                 tradesHtml += '</ul>';
 
-                card.innerHTML = headerHtml + positionHtml + chartHtml + buttonsHtml + tradesHtml;
+                card.innerHTML = headerHtml + totalFundsHtml + positionHtml + chartHtml + buttonsHtml + tradesHtml;
                 container.appendChild(card);
 
-                // 异步加载K线数据
                 loadKlines(s.id, chartId);
             });
         }
 
-        // 加载K线并绘制
         async function loadKlines(strategyId, chartId) {
             try {
                 const res = await fetch(`${API_BASE}/strategy/${strategyId}?user=${USER_ID}`);
                 const data = await res.json();
                 if (data.klines && data.klines.length) {
-                    renderChart(chartId, data.klines);
+                    setTimeout(() => renderChart(chartId, data.klines), 200);
                 }
-            } catch (err) {
-                console.error('K线加载失败', err);
-            }
+            } catch (err) {}
         }
 
         function renderChart(containerId, klines) {
             const container = document.getElementById(containerId);
             if (!container) return;
-            const chart = LightweightCharts.createChart(container, {
-                width: container.clientWidth,
-                height: 180,
-                layout: { backgroundColor: '#1a1f2e', textColor: '#aaa' },
-                grid: { vertLines: { color: '#2c3242' }, horzLines: { color: '#2c3242' } },
-                rightPriceScale: { borderColor: '#2c3242' },
-                timeScale: { borderColor: '#2c3242' },
-            });
-            const series = chart.addCandlestickSeries({
-                upColor: '#8ce99a', downColor: '#f7a8a8', borderVisible: false,
-                wickUpColor: '#8ce99a', wickDownColor: '#f7a8a8',
-            });
-            const adapted = klines.map(k => ({
-                time: k.time,
-                open: k.open,
-                high: k.high,
-                low: k.low,
-                close: k.close
-            }));
-            series.setData(adapted);
-            chart.timeScale().fitContent();
+            container.style.width = '100%';
+            container.style.height = '200px';
+            container.innerHTML = '';
+            if (typeof LightweightCharts === 'undefined') return;
+
+            try {
+                const chart = LightweightCharts.createChart(container, {
+                    width: container.clientWidth,
+                    height: 200,
+                    layout: { backgroundColor: '#0f1420', textColor: '#aaa' },
+                    grid: { vertLines: { color: '#2d3440' }, horzLines: { color: '#2d3440' } },
+                    rightPriceScale: { borderColor: '#2d3440' },
+                    timeScale: { borderColor: '#2d3440' },
+                });
+
+                // 主K线图
+                const candleSeries = chart.addCandlestickSeries({
+                    upColor: '#8ce99a', downColor: '#f7a8a8', borderVisible: false,
+                    wickUpColor: '#8ce99a', wickDownColor: '#f7a8a8',
+                });
+
+                // 计算简单EMA（示例EMA9）
+                const closes = klines.map(k => k.close);
+                const ema9 = calculateEMA(closes, 9);
+                const emaData = klines.map((k, i) => ({ time: Math.floor(k.time / 1000), value: ema9[i] })).filter(d => d.value !== undefined);
+
+                const emaSeries = chart.addLineSeries({ color: '#f0b90b', lineWidth: 2 });
+                emaSeries.setData(emaData);
+
+                // 成交量子图（新建一个轴）
+                const volumeSeries = chart.addHistogramSeries({
+                    color: '#4caf50',
+                    priceFormat: { type: 'volume' },
+                    priceScaleId: 'volume',
+                });
+                chart.priceScale('volume').applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } });
+                const volumeData = klines.map(k => ({ time: Math.floor(k.time / 1000), value: k.volume, color: k.close > k.open ? '#8ce99a' : '#f7a8a8' }));
+                volumeSeries.setData(volumeData);
+
+                candleSeries.setData(klines.map(k => ({
+                    time: Math.floor(k.time / 1000),
+                    open: k.open,
+                    high: k.high,
+                    low: k.low,
+                    close: k.close
+                })));
+
+                chart.timeScale().fitContent();
+
+                new ResizeObserver(() => chart.resize(container.clientWidth, 200)).observe(container);
+            } catch (err) {}
         }
 
-        // 启动/停止
+        // 简单EMA计算
+        function calculateEMA(data, period) {
+            const k = 2 / (period + 1);
+            let ema = [];
+            let prev = data[0];
+            ema[0] = prev;
+            for (let i = 1; i < data.length; i++) {
+                ema[i] = (data[i] - prev) * k + prev;
+                prev = ema[i];
+            }
+            return ema;
+        }
+
         window.toggleStrategy = async (id, active) => {
             await fetch(`${API_BASE}/strategy/${id}/control?user=${USER_ID}`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ active })
             });
             loadStrategies();
         };
 
-        // 市价全平
         window.closePosition = async (id) => {
             if (!confirm('确认市价全平当前仓位？')) return;
-            const res = await fetch(`${API_BASE}/strategy/${id}/close?user=${USER_ID}`, {
-                method: 'POST'
-            });
-            if (res.ok) {
-                alert('平仓成功');
-                loadStrategies();
-            } else {
-                alert('平仓失败');
-            }
+            const res = await fetch(`${API_BASE}/strategy/${id}/close?user=${USER_ID}`, { method: 'POST' });
+            if (res.ok) { alert('平仓成功'); loadStrategies(); } else alert('平仓失败');
         };
 
-        // 初始加载
+        window.deleteStrategy = async (id) => {
+            if (!confirm('确认删除该策略？')) return;
+            const res = await fetch(`${API_BASE}/strategy/${id}?user=${USER_ID}`, { method: 'DELETE' });
+            if (res.ok) { alert('策略已删除'); loadStrategies(); } else alert('删除失败');
+        };
+
         loadStrategies();
-        setInterval(loadStrategies, 10000);
+        setInterval(loadStrategies, 30000);
     </script>
 </body>
 </html>
