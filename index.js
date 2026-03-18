@@ -54,6 +54,7 @@ async function fetchKlines(symbol, interval, limit = 2) {
   return null;
 }
 
+// 获取所有永续合约列表（缓存1小时）
 let instrumentsCache = { data: null, timestamp: 0 };
 async function fetchAllSwapInstruments() {
   const now = Date.now();
@@ -66,7 +67,6 @@ async function fetchAllSwapInstruments() {
     if (res.data.code === '0' && res.data.data) {
       const instruments = res.data.data.map(item => item.instId);
       instrumentsCache = { data: instruments, timestamp: now };
-      console.log(`当前永续合约总数: ${instruments.length}`);
       return instruments;
     }
   } catch (err) {
@@ -139,6 +139,7 @@ async function closePosition(strategy, account, price, reason = '') {
 }
 
 // ==================== 策略核心 ====================
+// K线之王策略（原样不变）
 async function runKlineKing(strategy) {
   if (!strategy.config || !strategy.config.active) return;
 
@@ -206,11 +207,10 @@ async function runKlineKing(strategy) {
   account.markPrice = latestKline.close;
 }
 
+// 全市场最长上影线做空策略（修正版）
 async function runWickAny(strategy) {
   if (!strategy.config || !strategy.config.active) return;
-
-  // 如果正在扫描中，直接返回，避免并发
-  if (strategy.scanning) return;
+  if (strategy.scanning) return; // 扫描锁
 
   const account = strategy.account;
   const interval = strategy.config.interval;
@@ -222,12 +222,11 @@ async function runWickAny(strategy) {
 
   const nowMs = Date.now();
 
-  // 如果有持仓
+  // 有持仓：平仓条件为开仓时间 + 2个周期（下一根K线收盘）
   if (account.position) {
-    const position = account.position;
     const openKlineTime = strategy.state.openKlineTime;
-    if (nowMs >= openKlineTime + intervalMsVal) {
-      const klines = await fetchKlines(position.symbol, interval, 1);
+    if (nowMs >= openKlineTime + 2 * intervalMsVal) {
+      const klines = await fetchKlines(account.position.symbol, interval, 1);
       if (klines && klines[0]) {
         await closePosition(strategy, account, klines[0].close, 'wick exit');
       }
@@ -265,11 +264,9 @@ async function runWickAny(strategy) {
   const timeToClose = endMs - nowMs;
   if (timeToClose > 59000 || timeToClose <= 0) return;
 
-  // 设置扫描锁
+  // 开始扫描
   strategy.scanning = true;
-
   try {
-    // 分批扫描
     const BATCH_SIZE = 10;
     const results = [];
 
@@ -279,10 +276,12 @@ async function runWickAny(strategy) {
         const klines = await fetchKlines(symbol, interval, 1);
         if (klines && klines[0]) {
           const k = klines[0];
-          // 上影线 = 最高 - max(开盘, 收盘)
-          const wick = k.high - Math.max(k.open, k.close);
-          if (wick > 0) {
-            return { symbol, wick, kline: k };
+          // 只考虑阴线且上影线 > 0
+          if (k.close < k.open) {
+            const wick = k.high - Math.max(k.open, k.close);
+            if (wick > 0) {
+              return { symbol, wick, kline: k };
+            }
           }
         }
         return null;
@@ -295,6 +294,7 @@ async function runWickAny(strategy) {
       }
     }
 
+    // 找出上影线最长的合约
     let maxWick = 0;
     let target = null;
     results.forEach(r => {
@@ -308,11 +308,11 @@ async function runWickAny(strategy) {
       await openPosition(strategy, account, 'short', target.kline.close, target.kline.time, target.symbol);
     }
   } finally {
-    // 释放扫描锁
     strategy.scanning = false;
   }
 }
 
+// 主调度函数
 async function runStrategy(strategy) {
   if (!strategy.config || !strategy.config.active) return;
   const type = strategy.config.type;
@@ -323,6 +323,7 @@ async function runStrategy(strategy) {
   }
 }
 
+// 每秒执行一次
 setInterval(() => {
   for (const userId in userData) {
     for (const id in userData[userId].strategies) {
