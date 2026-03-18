@@ -12,19 +12,16 @@ app.use((req, res, next) => {
 });
 app.use(express.json());
 
-// 内存存储
 const userData = {};
 const USER_ID = 'demo_user';
 const DEFAULT_BALANCE = 10000;
 if (!userData[USER_ID]) userData[USER_ID] = { strategies: {} };
 
-// 常量
 const OKX_API_BASE = 'https://www.okx.com';
 const TAKER_FEE_RATE = 0.0005;
 const SLIPPAGE_RATE = 0.0003;
 const now = () => Math.floor(Date.now() / 1000);
 
-// 周期转毫秒
 const intervalMs = {
   '15m': 15 * 60 * 1000,
   '30m': 30 * 60 * 1000,
@@ -35,14 +32,39 @@ const intervalMs = {
   '12h': 12 * 60 * 60 * 1000,
 };
 
-// 获取K线（最多50根）
-async function fetchKlines(symbol, interval, limit = 50) {
+// ==================== 技术指标函数 ====================
+function calculateEMA(data, period) {
+  const k = 2 / (period + 1);
+  let ema = [data[0]];
+  for (let i = 1; i < data.length; i++) {
+    ema[i] = (data[i] - ema[i-1]) * k + ema[i-1];
+  }
+  return ema;
+}
+
+function calculateATR(klines, period) {
+  if (klines.length < period + 1) return null;
+  const tr = [];
+  for (let i = 1; i < klines.length; i++) {
+    const high = klines[i].high;
+    const low = klines[i].low;
+    const prevClose = klines[i-1].close;
+    tr.push(Math.max(high - low, Math.abs(high - prevClose), Math.abs(low - prevClose)));
+  }
+  let sum = 0;
+  for (let i = tr.length - period; i < tr.length; i++) {
+    sum += tr[i];
+  }
+  return sum / period;
+}
+
+async function fetchKlines(symbol, interval, limit = 200) {
   try {
     const url = `${OKX_API_BASE}/api/v5/market/candles?instId=${symbol}&bar=${interval}&limit=${limit}`;
     const res = await axios.get(url);
     if (res.data.code === '0' && res.data.data) {
       return res.data.data.map(item => ({
-        time: parseInt(item[0]),           // 毫秒
+        time: parseInt(item[0]),
         open: parseFloat(item[1]),
         high: parseFloat(item[2]),
         low: parseFloat(item[3]),
@@ -56,18 +78,16 @@ async function fetchKlines(symbol, interval, limit = 50) {
   return null;
 }
 
-// 模拟成交价
+// ==================== 交易执行 ====================
 function getExecutedPrice(side, basePrice) {
   const slippage = basePrice * SLIPPAGE_RATE;
   return side === 'long' ? basePrice + slippage : basePrice - slippage;
 }
 
-// 计算张数
 function calculateSize(usdtAmount, leverage, price) {
   return (usdtAmount * leverage) / price;
 }
 
-// 开仓
 async function openPosition(strategy, account, side, price, klineTime) {
   const { leverage, marginMode, amountUsdt } = strategy.config;
   const execPrice = getExecutedPrice(side, price);
@@ -98,7 +118,6 @@ async function openPosition(strategy, account, side, price, klineTime) {
   strategy.state.openKlineTime = klineTime;
 }
 
-// 平仓
 async function closePosition(strategy, account, price, reason = '') {
   const position = account.position;
   if (!position) return null;
@@ -120,55 +139,54 @@ async function closePosition(strategy, account, price, reason = '') {
   return pnl;
 }
 
-// 策略核心（每分钟执行一次，检测新K线收盘）
+// ==================== 策略核心 ====================
 async function runStrategy(strategy) {
   if (!strategy.config || !strategy.config.active) return;
 
-  const { symbol, interval } = strategy.config;
+  const { symbol, interval, emaPeriod, atrMultiplier } = strategy.config;
   const intervalMsVal = intervalMs[interval] || 30 * 60 * 1000;
 
-  // 获取最新2根K线
-  const klines = await fetchKlines(symbol, interval, 2);
-  if (!klines || klines.length < 2) return;
+  // 获取足够多的K线用于计算指标（至少需要 max(emaPeriod, 14) 根）
+  const neededBars = Math.max(emaPeriod || 20, 14) + 5;
+  const klines = await fetchKlines(symbol, interval, neededBars);
+  if (!klines || klines.length < neededBars) return;
 
-  const latestKline = klines[klines.length - 1];      // 最新一根K线（可能是未收盘的）
-  const prevKline = klines[klines.length - 2];        // 上一根已收盘K线
+  const latestKline = klines[klines.length - 1];
+  const prevKline = klines[klines.length - 2];
 
   const account = strategy.account;
   const nowMs = Date.now();
 
-  // 判断上一根K线是否已经收盘（其结束时间 < 当前时间）
   const prevKlineEndTime = prevKline.time + intervalMsVal;
-  if (prevKlineEndTime > nowMs) return; // 还没收盘，等待下次
-
-  // 如果已经处理过这个K线，则跳过（通过记录最后处理的K线时间）
+  if (prevKlineEndTime > nowMs) return;
   if (strategy.lastProcessedKlineTime === prevKline.time) return;
   strategy.lastProcessedKlineTime = prevKline.time;
 
-  // 初始化状态
-  if (!strategy.state) {
-    strategy.state = { status: 'idle' };
-  }
+  // 计算指标
+  const closes = klines.map(k => k.close);
+  const ema = calculateEMA(closes, emaPeriod || 20).pop();
+  const atr = calculateATR(klines, 14); // ATR周期固定为14，常用值
+  if (!ema || !atr) return;
 
+  const multiplier = atrMultiplier || 2.0;
+
+  if (!strategy.state) strategy.state = { status: 'idle' };
   const state = strategy.state;
 
   // ========== 无持仓 ==========
   if (!account.position) {
     if (state.status === 'idle') {
-      // 初始：根据上一根K线决定等待方向
-      if (prevKline.close < prevKline.open) { // 阴线 -> 等待阳线开多
+      if (prevKline.close < prevKline.open && prevKline.close < ema) {
         state.status = 'wait_long';
-      } else if (prevKline.close > prevKline.open) { // 阳线 -> 等待阴线开空
+      } else if (prevKline.close > prevKline.open && prevKline.close > ema) {
         state.status = 'wait_short';
       }
     } else if (state.status === 'wait_long') {
-      // 等待出现阳线开多
-      if (prevKline.close > prevKline.open) {
+      if (prevKline.close > prevKline.open && prevKline.close > ema) {
         await openPosition(strategy, account, 'long', prevKline.close, prevKline.time);
       }
     } else if (state.status === 'wait_short') {
-      // 等待出现阴线开空
-      if (prevKline.close < prevKline.open) {
+      if (prevKline.close < prevKline.open && prevKline.close < ema) {
         await openPosition(strategy, account, 'short', prevKline.close, prevKline.time);
       }
     }
@@ -177,29 +195,40 @@ async function runStrategy(strategy) {
     const position = account.position;
     const openKlineTime = state.openKlineTime;
 
-    // 判断是否到了平仓时机（开仓后已经过了一个周期，即当前是第二根K线收盘）
     if (prevKline.time >= openKlineTime + intervalMsVal) {
       if (position.side === 'long') {
-        if (prevKline.close > prevKline.open) { // 阳线 -> 止盈平多
-          await closePosition(strategy, account, prevKline.close, 'take profit');
-          state.status = 'wait_short'; // 等待阴线做空
-        } else if (prevKline.close < prevKline.open) { // 阴线 -> 止损平多，反手做空
+        const stopPrice = position.entryPrice - atr * multiplier;
+        if (prevKline.close < stopPrice) {
           await closePosition(strategy, account, prevKline.close, 'stop loss');
-          await openPosition(strategy, account, 'short', prevKline.close, prevKline.time);
+          state.status = 'wait_short';
+        } else {
+          if (prevKline.close > prevKline.open) {
+            await closePosition(strategy, account, prevKline.close, 'take profit');
+            state.status = 'wait_short';
+          } else if (prevKline.close < prevKline.open) {
+            await closePosition(strategy, account, prevKline.close, 'stop loss');
+            await openPosition(strategy, account, 'short', prevKline.close, prevKline.time);
+          }
         }
       } else if (position.side === 'short') {
-        if (prevKline.close < prevKline.open) { // 阴线 -> 止盈平空
-          await closePosition(strategy, account, prevKline.close, 'take profit');
-          state.status = 'wait_long'; // 等待阳线做多
-        } else if (prevKline.close > prevKline.open) { // 阳线 -> 止损平空，反手做多
+        const stopPrice = position.entryPrice + atr * multiplier;
+        if (prevKline.close > stopPrice) {
           await closePosition(strategy, account, prevKline.close, 'stop loss');
-          await openPosition(strategy, account, 'long', prevKline.close, prevKline.time);
+          state.status = 'wait_long';
+        } else {
+          if (prevKline.close < prevKline.open) {
+            await closePosition(strategy, account, prevKline.close, 'take profit');
+            state.status = 'wait_long';
+          } else if (prevKline.close > prevKline.open) {
+            await closePosition(strategy, account, prevKline.close, 'stop loss');
+            await openPosition(strategy, account, 'long', prevKline.close, prevKline.time);
+          }
         }
       }
     }
   }
 
-  // 更新未实现盈亏（使用最新K线的收盘价作为标记价格）
+  // 更新未实现盈亏
   if (account.position) {
     const upnl = account.position.side === 'long'
       ? (latestKline.close - account.position.entryPrice) * account.position.size
@@ -212,14 +241,14 @@ async function runStrategy(strategy) {
   account.markPrice = latestKline.close;
 }
 
-// 每分钟执行一次（60秒）
+// 每秒执行一次
 setInterval(() => {
   for (const userId in userData) {
     for (const id in userData[userId].strategies) {
       runStrategy(userData[userId].strategies[id]).catch(e => console.error(e));
     }
   }
-}, 60 * 1000);
+}, 1000);
 
 // ==================== API 路由 ====================
 app.get('/strategies', (req, res) => {
@@ -233,6 +262,8 @@ app.get('/strategies', (req, res) => {
     leverage: s.config.leverage,
     amountUsdt: s.config.amountUsdt,
     marginMode: s.config.marginMode,
+    emaPeriod: s.config.emaPeriod,
+    atrMultiplier: s.config.atrMultiplier,
     active: s.config.active || false,
     equity: s.account.equity,
     position: s.account.position,
@@ -246,7 +277,7 @@ app.get('/strategies', (req, res) => {
 
 app.post('/strategy', (req, res) => {
   const userId = req.query.user || USER_ID;
-  const { name, symbol, interval, leverage, amountUsdt, marginMode } = req.body;
+  const { name, symbol, interval, leverage, amountUsdt, marginMode, emaPeriod, atrMultiplier } = req.body;
   if (!symbol || !interval || !leverage || !amountUsdt) {
     return res.status(400).json({ error: '参数不完整' });
   }
@@ -259,6 +290,8 @@ app.post('/strategy', (req, res) => {
       leverage: parseInt(leverage),
       amountUsdt: parseFloat(amountUsdt),
       marginMode: marginMode || 'cross',
+      emaPeriod: parseInt(emaPeriod) || 20,
+      atrMultiplier: parseFloat(atrMultiplier) || 2.0,
       active: false
     },
     account: {
