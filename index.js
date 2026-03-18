@@ -12,19 +12,16 @@ app.use((req, res, next) => {
 });
 app.use(express.json());
 
-// 内存存储
 const userData = {};
 const USER_ID = 'demo_user';
 const DEFAULT_BALANCE = 10000;
 if (!userData[USER_ID]) userData[USER_ID] = { strategies: {} };
 
-// 常量
 const OKX_API_BASE = 'https://www.okx.com';
 const TAKER_FEE_RATE = 0.0005;
 const SLIPPAGE_RATE = 0.0003;
 const now = () => Math.floor(Date.now() / 1000);
 
-// 周期转毫秒
 const intervalMs = {
   '15m': 15 * 60 * 1000,
   '30m': 30 * 60 * 1000,
@@ -37,7 +34,7 @@ const intervalMs = {
 };
 
 // ==================== 工具函数 ====================
-async function fetchKlines(symbol, interval, limit = 100) {
+async function fetchKlines(symbol, interval, limit = 2) {
   try {
     const url = `${OKX_API_BASE}/api/v5/market/candles?instId=${symbol}&bar=${interval}&limit=${limit}`;
     const res = await axios.get(url);
@@ -52,7 +49,8 @@ async function fetchKlines(symbol, interval, limit = 100) {
       })).reverse();
     }
   } catch (err) {
-    console.error('获取K线失败', err.message);
+    // 忽略单个合约失败
+    return null;
   }
   return null;
 }
@@ -68,10 +66,7 @@ async function fetchAllSwapInstruments() {
     const url = `${OKX_API_BASE}/api/v5/public/instruments?instType=SWAP`;
     const res = await axios.get(url);
     if (res.data.code === '0' && res.data.data) {
-      const instruments = res.data.data.map(item => ({
-        instId: item.instId,
-        listTime: parseInt(item.listTime) // 上线时间戳（毫秒）
-      }));
+      const instruments = res.data.data.map(item => item.instId);
       instrumentsCache = { data: instruments, timestamp: now };
       return instruments;
     }
@@ -91,7 +86,7 @@ function calculateSize(usdtAmount, leverage, price) {
 }
 
 // ==================== 交易执行 ====================
-async function openPosition(strategy, account, side, price, klineTime) {
+async function openPosition(strategy, account, side, price, klineTime, symbol) {
   const { leverage, marginMode, amountUsdt } = strategy.config;
   const execPrice = getExecutedPrice(side, price);
   const size = calculateSize(amountUsdt, leverage, execPrice);
@@ -105,6 +100,7 @@ async function openPosition(strategy, account, side, price, klineTime) {
   account.balance -= initialMargin;
 
   const position = {
+    symbol,
     side,
     size,
     entryPrice: execPrice,
@@ -115,11 +111,11 @@ async function openPosition(strategy, account, side, price, klineTime) {
     unrealizedPnl: 0
   };
   account.position = position;
-  account.history.push({ type: 'open', side, size, price: execPrice, fee, time: now() });
+  account.history.push({ type: 'open', side, size, price: execPrice, fee, time: now(), symbol });
   account.equity = account.balance + (position.size * position.entryPrice / position.leverage);
-  // 更新策略状态
   strategy.state.status = side === 'long' ? 'in_long' : 'in_short';
   strategy.state.openKlineTime = klineTime;
+  strategy.state.openSymbol = symbol;
 }
 
 async function closePosition(strategy, account, price, reason = '') {
@@ -137,14 +133,14 @@ async function closePosition(strategy, account, price, reason = '') {
 
   account.realizedPnl += pnl;
   account.totalReturn = account.realizedPnl / DEFAULT_BALANCE;
-  account.history.push({ type: 'close', side: position.side, size, price: execPrice, pnl, fee, time: now(), reason });
+  account.history.push({ type: 'close', side: position.side, size, price: execPrice, pnl, fee, time: now(), reason, symbol: position.symbol });
   account.position = null;
   account.equity = account.balance;
   return pnl;
 }
 
 // ==================== 策略核心 ====================
-// K线之王策略（原基础版）
+// K线之王策略
 async function runKlineKing(strategy) {
   if (!strategy.config || !strategy.config.active) return;
 
@@ -172,9 +168,9 @@ async function runKlineKing(strategy) {
       if (prevKline.close < prevKline.open) state.status = 'wait_long';
       else if (prevKline.close > prevKline.open) state.status = 'wait_short';
     } else if (state.status === 'wait_long' && prevKline.close > prevKline.open) {
-      await openPosition(strategy, account, 'long', prevKline.close, prevKline.time);
+      await openPosition(strategy, account, 'long', prevKline.close, prevKline.time, symbol);
     } else if (state.status === 'wait_short' && prevKline.close < prevKline.open) {
-      await openPosition(strategy, account, 'short', prevKline.close, prevKline.time);
+      await openPosition(strategy, account, 'short', prevKline.close, prevKline.time, symbol);
     }
   } else {
     const position = account.position;
@@ -186,7 +182,7 @@ async function runKlineKing(strategy) {
           state.status = 'wait_short';
         } else if (prevKline.close < prevKline.open) {
           await closePosition(strategy, account, prevKline.close, 'stop loss');
-          await openPosition(strategy, account, 'short', prevKline.close, prevKline.time);
+          await openPosition(strategy, account, 'short', prevKline.close, prevKline.time, symbol);
         }
       } else if (position.side === 'short') {
         if (prevKline.close < prevKline.open) {
@@ -194,7 +190,7 @@ async function runKlineKing(strategy) {
           state.status = 'wait_long';
         } else if (prevKline.close > prevKline.open) {
           await closePosition(strategy, account, prevKline.close, 'stop loss');
-          await openPosition(strategy, account, 'long', prevKline.close, prevKline.time);
+          await openPosition(strategy, account, 'long', prevKline.close, prevKline.time, symbol);
         }
       }
     }
@@ -212,65 +208,111 @@ async function runKlineKing(strategy) {
   account.markPrice = latestKline.close;
 }
 
-// 上引空策略：每天23:59:59筛选上线最久且收阴的合约做空
-async function runDailyShort(strategy) {
+// 可配置周期全市场最长上影线做空策略
+async function runWickAny(strategy) {
   if (!strategy.config || !strategy.config.active) return;
 
   const account = strategy.account;
+  const interval = strategy.config.interval;
+  const intervalMsVal = intervalMs[interval];
+  if (!intervalMsVal) return;
+
+  const allSymbols = await fetchAllSwapInstruments();
+  if (!allSymbols || allSymbols.length === 0) return;
+
+  const nowMs = Date.now();
+
+  // 如果有持仓
+  if (account.position) {
+    const position = account.position;
+    const openKlineTime = strategy.state.openKlineTime;
+
+    if (nowMs >= openKlineTime + intervalMsVal) {
+      const klines = await fetchKlines(position.symbol, interval, 1);
+      if (klines && klines[0]) {
+        await closePosition(strategy, account, klines[0].close, 'wick exit');
+      }
+    }
+    return;
+  }
+
+  // 无持仓，计算当前K线收盘前时间窗口
   const now = new Date();
-  const currentHour = now.getHours();
-  const currentMinute = now.getMinutes();
+  let endTime;
+  if (interval.endsWith('m')) {
+    const minutes = parseInt(interval);
+    const cycleStart = Math.floor(now.getMinutes() / minutes) * minutes;
+    endTime = new Date(now);
+    endTime.setMinutes(cycleStart + minutes);
+    endTime.setSeconds(0);
+    endTime.setMilliseconds(0);
+  } else if (interval.endsWith('h')) {
+    const hours = parseInt(interval);
+    const cycleStart = Math.floor(now.getHours() / hours) * hours;
+    endTime = new Date(now);
+    endTime.setHours(cycleStart + hours);
+    endTime.setMinutes(0);
+    endTime.setSeconds(0);
+    endTime.setMilliseconds(0);
+  } else if (interval === '1d') {
+    endTime = new Date(now);
+    endTime.setDate(endTime.getDate() + 1);
+    endTime.setHours(0, 0, 0, 0);
+  } else {
+    return;
+  }
 
-  // 仅在23:59:00 - 23:59:59之间执行
-  if (currentHour !== 23 || currentMinute !== 59) return;
+  const endMs = endTime.getTime();
+  const timeToClose = endMs - nowMs;
+  if (timeToClose > 59000 || timeToClose <= 0) return;
 
-  const intervalMsVal = intervalMs['1d']; // 86400000 ms
+  // 分批扫描
+  const BATCH_SIZE = 10;
+  const results = [];
 
-  // 如果当天已经处理过，避免重复开仓（通过记录最后开仓日）
-  const today = now.toISOString().split('T')[0];
-  if (strategy.lastProcessedDate === today) return;
-  strategy.lastProcessedDate = today;
+  for (let i = 0; i < allSymbols.length; i += BATCH_SIZE) {
+    const batch = allSymbols.slice(i, i + BATCH_SIZE);
+    const promises = batch.map(async symbol => {
+      const klines = await fetchKlines(symbol, interval, 1);
+      if (klines && klines[0]) {
+        const k = klines[0];
+        const wick = k.high - Math.max(k.open, k.close);
+        if (wick > 0) {
+          return { symbol, wick, kline: k };
+        }
+      }
+      return null;
+    });
+    const batchResults = await Promise.all(promises);
+    results.push(...batchResults.filter(r => r !== null));
 
-  // 获取所有永续合约
-  const instruments = await fetchAllSwapInstruments();
-  if (!instruments || instruments.length === 0) return;
-
-  // 计算每个合约的上线天数，找出上线最久的
-  let longestListTime = Infinity; // 上线时间戳越小越早
-  let longestContract = null;
-  for (const inst of instruments) {
-    if (inst.listTime < longestListTime) {
-      longestListTime = inst.listTime;
-      longestContract = inst.instId;
+    if (i + BATCH_SIZE < allSymbols.length) {
+      await new Promise(resolve => setTimeout(resolve, 1000));
     }
   }
-  if (!longestContract) return;
 
-  // 获取该合约的日K线（最近一根）
-  const klines = await fetchKlines(longestContract, '1d', 1);
-  if (!klines || klines.length === 0) return;
-  const latestDaily = klines[0]; // 最新日K线（23:59:59时应该已收盘）
+  let maxWick = 0;
+  let target = null;
+  results.forEach(r => {
+    if (r.wick > maxWick) {
+      maxWick = r.wick;
+      target = r;
+    }
+  });
 
-  // 判断是否收阴
-  if (latestDaily.close >= latestDaily.open) return; // 不是阴线，不开仓
-
-  // 如果有持仓，先平仓（持有一天）
-  if (account.position) {
-    await closePosition(strategy, account, latestDaily.close, 'daily close');
+  if (target) {
+    await openPosition(strategy, account, 'short', target.kline.close, target.kline.time, target.symbol);
   }
-
-  // 开空
-  await openPosition(strategy, account, 'short', latestDaily.close, latestDaily.time);
 }
 
 // 主调度函数
 async function runStrategy(strategy) {
   if (!strategy.config || !strategy.config.active) return;
-  const type = strategy.config.type || 'kline_king';
+  const type = strategy.config.type;
   if (type === 'kline_king') {
     await runKlineKing(strategy);
-  } else if (type === 'daily_short') {
-    await runDailyShort(strategy);
+  } else if (type === 'wick_any') {
+    await runWickAny(strategy);
   }
 }
 
@@ -290,7 +332,7 @@ app.get('/strategies', (req, res) => {
   const list = Object.entries(strategies).map(([id, s]) => ({
     id,
     name: s.config.name || id,
-    type: s.config.type || 'kline_king',
+    type: s.config.type,
     symbol: s.config.symbol || '',
     interval: s.config.interval,
     leverage: s.config.leverage,
@@ -310,19 +352,18 @@ app.get('/strategies', (req, res) => {
 app.post('/strategy', (req, res) => {
   const userId = req.query.user || USER_ID;
   const { name, type, symbol, interval, leverage, amountUsdt, marginMode } = req.body;
-  if (!interval || !leverage || !amountUsdt) {
+  if (!type || !interval || !leverage || !amountUsdt) {
     return res.status(400).json({ error: '参数不完整' });
   }
-  // 如果是K线之王，必须有symbol
-  if (type !== 'daily_short' && !symbol) {
-    return res.status(400).json({ error: '请选择交易对' });
+  if (type === 'kline_king' && !symbol) {
+    return res.status(400).json({ error: 'K线之王需要选择交易对' });
   }
   const strategyId = uuidv4();
   const newStrategy = {
     config: {
       name: name || strategyId,
-      type: type || 'kline_king',
-      symbol: type === 'daily_short' ? '' : symbol,
+      type,
+      symbol: type === 'kline_king' ? symbol : '',
       interval,
       leverage: parseInt(leverage),
       amountUsdt: parseFloat(amountUsdt),
