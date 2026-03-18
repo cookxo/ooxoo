@@ -49,13 +49,11 @@ async function fetchKlines(symbol, interval, limit = 2) {
       })).reverse();
     }
   } catch (err) {
-    // 忽略单个合约失败
     return null;
   }
   return null;
 }
 
-// 获取所有永续合约列表（缓存1小时）
 let instrumentsCache = { data: null, timestamp: 0 };
 async function fetchAllSwapInstruments() {
   const now = Date.now();
@@ -68,6 +66,7 @@ async function fetchAllSwapInstruments() {
     if (res.data.code === '0' && res.data.data) {
       const instruments = res.data.data.map(item => item.instId);
       instrumentsCache = { data: instruments, timestamp: now };
+      console.log(`当前永续合约总数: ${instruments.length}`);
       return instruments;
     }
   } catch (err) {
@@ -140,7 +139,6 @@ async function closePosition(strategy, account, price, reason = '') {
 }
 
 // ==================== 策略核心 ====================
-// K线之王策略
 async function runKlineKing(strategy) {
   if (!strategy.config || !strategy.config.active) return;
 
@@ -208,9 +206,11 @@ async function runKlineKing(strategy) {
   account.markPrice = latestKline.close;
 }
 
-// 可配置周期全市场最长上影线做空策略
 async function runWickAny(strategy) {
   if (!strategy.config || !strategy.config.active) return;
+
+  // 如果正在扫描中，直接返回，避免并发
+  if (strategy.scanning) return;
 
   const account = strategy.account;
   const interval = strategy.config.interval;
@@ -226,7 +226,6 @@ async function runWickAny(strategy) {
   if (account.position) {
     const position = account.position;
     const openKlineTime = strategy.state.openKlineTime;
-
     if (nowMs >= openKlineTime + intervalMsVal) {
       const klines = await fetchKlines(position.symbol, interval, 1);
       if (klines && klines[0]) {
@@ -266,46 +265,54 @@ async function runWickAny(strategy) {
   const timeToClose = endMs - nowMs;
   if (timeToClose > 59000 || timeToClose <= 0) return;
 
-  // 分批扫描
-  const BATCH_SIZE = 10;
-  const results = [];
+  // 设置扫描锁
+  strategy.scanning = true;
 
-  for (let i = 0; i < allSymbols.length; i += BATCH_SIZE) {
-    const batch = allSymbols.slice(i, i + BATCH_SIZE);
-    const promises = batch.map(async symbol => {
-      const klines = await fetchKlines(symbol, interval, 1);
-      if (klines && klines[0]) {
-        const k = klines[0];
-        const wick = k.high - Math.max(k.open, k.close);
-        if (wick > 0) {
-          return { symbol, wick, kline: k };
+  try {
+    // 分批扫描
+    const BATCH_SIZE = 10;
+    const results = [];
+
+    for (let i = 0; i < allSymbols.length; i += BATCH_SIZE) {
+      const batch = allSymbols.slice(i, i + BATCH_SIZE);
+      const promises = batch.map(async symbol => {
+        const klines = await fetchKlines(symbol, interval, 1);
+        if (klines && klines[0]) {
+          const k = klines[0];
+          // 上影线 = 最高 - max(开盘, 收盘)
+          const wick = k.high - Math.max(k.open, k.close);
+          if (wick > 0) {
+            return { symbol, wick, kline: k };
+          }
         }
+        return null;
+      });
+      const batchResults = await Promise.all(promises);
+      results.push(...batchResults.filter(r => r !== null));
+
+      if (i + BATCH_SIZE < allSymbols.length) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
       }
-      return null;
+    }
+
+    let maxWick = 0;
+    let target = null;
+    results.forEach(r => {
+      if (r.wick > maxWick) {
+        maxWick = r.wick;
+        target = r;
+      }
     });
-    const batchResults = await Promise.all(promises);
-    results.push(...batchResults.filter(r => r !== null));
 
-    if (i + BATCH_SIZE < allSymbols.length) {
-      await new Promise(resolve => setTimeout(resolve, 1000));
+    if (target) {
+      await openPosition(strategy, account, 'short', target.kline.close, target.kline.time, target.symbol);
     }
-  }
-
-  let maxWick = 0;
-  let target = null;
-  results.forEach(r => {
-    if (r.wick > maxWick) {
-      maxWick = r.wick;
-      target = r;
-    }
-  });
-
-  if (target) {
-    await openPosition(strategy, account, 'short', target.kline.close, target.kline.time, target.symbol);
+  } finally {
+    // 释放扫描锁
+    strategy.scanning = false;
   }
 }
 
-// 主调度函数
 async function runStrategy(strategy) {
   if (!strategy.config || !strategy.config.active) return;
   const type = strategy.config.type;
@@ -316,7 +323,6 @@ async function runStrategy(strategy) {
   }
 }
 
-// 每秒执行一次
 setInterval(() => {
   for (const userId in userData) {
     for (const id in userData[userId].strategies) {
