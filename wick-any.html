@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=yes">
-    <title>上引空策略 · 每日自动</title>
+    <title>全市场·最长上影线做空</title>
     <script src="https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js"></script>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -57,9 +57,6 @@
         .chart-container { height: 200px; margin: 12px 0; border-radius: 16px; overflow: hidden; }
         .positive { color: #8ce99a; }
         .negative { color: #f7a8a8; }
-        .param-badge {
-            background: #2f3e5a; color: #b0d0ff; padding: 2px 8px; border-radius: 12px; font-size: 11px;
-        }
         .back-link {
             display: inline-block; margin-bottom: 16px; color: #8a94a8; text-decoration: none;
         }
@@ -67,7 +64,7 @@
 </head>
 <body>
     <a href="index.html" class="back-link">← 返回首页</a>
-    <h2 style="margin-bottom: 16px;">🌙 上引空策略 · 每日自动</h2>
+    <h2 style="margin-bottom: 16px;">📈 全市场最长上影线做空 (周期可选)</h2>
 
     <div class="card">
         <div class="title">账户总览</div>
@@ -81,7 +78,16 @@
         <div class="title">➕ 创建新策略</div>
         <div class="grid-2">
             <div><label>策略名称</label><input type="text" id="newName" placeholder="可选"></div>
-            <div><label>周期</label><input type="text" value="1天 (自动)" disabled class="disabled-input"></div>
+            <div>
+                <label>K线周期</label>
+                <select id="newInterval">
+                    <option value="15m">15分钟</option>
+                    <option value="30m">30分钟</option>
+                    <option value="1h">1小时</option>
+                    <option value="4h">4小时</option>
+                    <option value="1d">1天 (23:59)</option>
+                </select>
+            </div>
             <div><label>杠杆</label><input type="number" id="newLeverage" min="1" max="100" value="10" step="1"></div>
             <div><label>金额 (USDT)</label><input type="number" id="newAmount" min="1" value="100" step="1"></div>
             <div>
@@ -100,10 +106,11 @@
     <script>
         const API_BASE = 'https://ooxoo-production.up.railway.app'; // ⚠️ 替换为您的实际域名
         const USER_ID = 'demo_user';
-        const STRATEGY_TYPE = 'daily_short';
+        const STRATEGY_TYPE = 'wick_any';
 
         document.getElementById('createBtn').addEventListener('click', async () => {
             const name = document.getElementById('newName').value.trim() || undefined;
+            const interval = document.getElementById('newInterval').value;
             const leverage = parseInt(document.getElementById('newLeverage').value);
             const amountUsdt = parseFloat(document.getElementById('newAmount').value);
             const marginMode = document.querySelector('input[name="newMarginMode"]:checked').value;
@@ -114,8 +121,7 @@
                 body: JSON.stringify({ 
                     name, 
                     type: STRATEGY_TYPE,
-                    symbol: '', // 后端会忽略
-                    interval: '1d', // 固定周期
+                    interval,
                     leverage, 
                     amountUsdt, 
                     marginMode 
@@ -124,7 +130,10 @@
             if (res.ok) {
                 document.getElementById('newName').value = '';
                 loadStrategies();
-            } else alert('创建失败');
+            } else {
+                const err = await res.text();
+                alert('创建失败: ' + err);
+            }
         });
 
         async function loadStrategies() {
@@ -167,7 +176,7 @@
                     <div class="row">
                         <div>
                             <span style="font-weight:600;">${s.name || s.id.slice(0,8)}</span>
-                            <span class="badge">自动筛选</span>
+                            <span class="badge">全市场·${s.interval}</span>
                             <span class="badge ${s.active ? 'active' : ''}">${s.active ? '运行' : '停止'}</span>
                             <span class="badge" style="background:#3b4256;">${statusText}</span>
                         </div>
@@ -192,9 +201,9 @@
                         <div class="price-item"><span class="price-label">杠杆</span><span class="price-value">${pos ? pos.leverage : s.leverage}x</span></div>
                     </div>
                     <div class="price-row">
+                        <div class="price-item"><span class="price-label">开仓合约</span><span class="price-value">${pos ? pos.symbol : '—'}</span></div>
                         <div class="price-item"><span class="price-label">开仓均价</span><span class="price-value">${pos ? pos.entryPrice.toFixed(2) : '0.00'}</span></div>
                         <div class="price-item"><span class="price-label">标记价格</span><span class="price-value">${(s.markPrice || 0).toFixed(2)}</span></div>
-                        <div class="price-item"><span class="price-label">预估强平价</span><span class="price-value">${pos ? (pos.entryPrice * (1 - 0.05)).toFixed(2) : '0.00'}</span></div>
                     </div>
                 `;
 
@@ -211,7 +220,8 @@
                     s.history.slice().reverse().forEach(t => {
                         const timeStr = new Date(t.time * 1000).toLocaleString('zh-CN', { hour12: false });
                         const sign = t.pnl >= 0 ? '+' : '';
-                        tradesHtml += `<li class="trade-item"><span>${timeStr} ${t.type==='open'?'开':'平'} ${t.side==='long'?'多':'空'} ${t.size.toFixed(4)} @ ${t.price.toFixed(2)}</span><span class="${t.pnl>=0?'positive':'negative'}">${sign}${(t.pnl||0).toFixed(2)}</span></li>`;
+                        const symbolText = t.symbol ? t.symbol.slice(0,10) : '';
+                        tradesHtml += `<li class="trade-item"><span>${timeStr} ${t.type==='open'?'开':'平'} ${t.side==='long'?'多':'空'} ${symbolText} ${t.size.toFixed(4)} @ ${t.price.toFixed(2)}</span><span class="${t.pnl>=0?'positive':'negative'}">${sign}${(t.pnl||0).toFixed(2)}</span></li>`;
                     });
                 } else {
                     tradesHtml += '<li class="trade-item" style="justify-content:center;">暂无交易</li>';
