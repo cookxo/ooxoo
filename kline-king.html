@@ -123,9 +123,9 @@
     <div id="strategy-list"></div>
 
     <script>
-        const API_BASE = 'https://ooxoo-production.up.railway.app'; // ⚠️ 替换为您的实际域名
+        const API_BASE = 'https://ooxoo-production.up.railway.app'; // ⚠️ 请替换为您的实际Railway域名
         const USER_ID = 'demo_user';
-        const STRATEGY_TYPE = 'kline_king'; // 固定类型
+        const STRATEGY_TYPE = 'kline_king';
 
         // 交易对切换
         const symbolSelect = document.getElementById('newSymbolSelect');
@@ -181,7 +181,6 @@
             try {
                 const res = await fetch(`${API_BASE}/strategies?user=${USER_ID}`);
                 const strategies = await res.json();
-                // 只显示当前类型的策略
                 const filtered = strategies.filter(s => s.type === STRATEGY_TYPE);
                 renderStrategies(filtered);
                 updateTotal(filtered);
