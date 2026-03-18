@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=yes">
-    <title>K线之王 · 专业版</title>
+    <title>K线之王 · 可调参数版</title>
     <script src="https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js"></script>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -54,17 +54,17 @@
             display: flex; justify-content: space-between; padding: 6px 0;
             border-bottom: 1px solid #2d3440; font-size: 12px;
         }
-        .chart-container {
-            height: 200px; margin: 12px 0; border-radius: 16px; overflow: hidden;
-            display: flex; align-items: center; justify-content: center; background: #0f1420;
-        }
+        .chart-container { height: 200px; margin: 12px 0; border-radius: 16px; overflow: hidden; }
         .positive { color: #8ce99a; }
         .negative { color: #f7a8a8; }
+        .param-badge {
+            background: #2f3e5a; color: #b0d0ff; padding: 2px 8px; border-radius: 12px; font-size: 11px;
+        }
     </style>
 </head>
 <body>
     <div class="row" style="margin-bottom: 16px;">
-        <h2>📊 K线之王 · 专业版</h2>
+        <h2>📊 K线之王 · 可调参数版</h2>
         <span class="badge">demo_user</span>
     </div>
 
@@ -92,7 +92,7 @@
                     <option value="custom">其他 (手动输入)</option>
                 </select>
                 <div id="customSymbolContainer" style="display: none;"><input type="text" id="customSymbol" placeholder="如 LINK-USDT-SWAP"></div>
-                <input type="hidden" id="newSymbol" value="BTC-USDT-SWAP">
+                <input type="hidden" id="newSymbol" value="SOL-USDT-SWAP">
             </div>
             <div>
                 <label>周期</label>
@@ -115,6 +115,9 @@
                     <label><input type="radio" name="newMarginMode" value="isolated"> 逐仓</label>
                 </div>
             </div>
+            <!-- 新增参数输入 -->
+            <div><label>EMA周期</label><input type="number" id="newEmaPeriod" min="1" max="200" value="20" step="1"></div>
+            <div><label>ATR倍数</label><input type="number" id="newAtrMultiplier" min="0.1" max="10" value="2.0" step="0.1"></div>
         </div>
         <button id="createBtn" style="margin-top:12px;">创建策略</button>
     </div>
@@ -122,7 +125,7 @@
     <div id="strategy-list"></div>
 
     <script>
-        const API_BASE = 'https://ooxoo-production.up.railway.app';
+        const API_BASE = 'https://ooxoo-production.up.railway.app'; // ⚠️ 替换为您的实际域名
         const USER_ID = 'demo_user';
 
         // 交易对切换
@@ -153,15 +156,17 @@
             const leverage = parseInt(document.getElementById('newLeverage').value);
             const amountUsdt = parseFloat(document.getElementById('newAmount').value);
             const marginMode = document.querySelector('input[name="newMarginMode"]:checked').value;
+            const emaPeriod = parseInt(document.getElementById('newEmaPeriod').value);
+            const atrMultiplier = parseFloat(document.getElementById('newAtrMultiplier').value);
 
             const res = await fetch(`${API_BASE}/strategy?user=${USER_ID}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name, symbol, interval, leverage, amountUsdt, marginMode })
+                body: JSON.stringify({ name, symbol, interval, leverage, amountUsdt, marginMode, emaPeriod, atrMultiplier })
             });
             if (res.ok) {
                 document.getElementById('newName').value = '';
-                symbolSelect.value = 'BTC-USDT-SWAP';
+                symbolSelect.value = 'SOL-USDT-SWAP';
                 updateSymbol();
                 loadStrategies();
             } else alert('创建失败');
@@ -199,6 +204,16 @@
                 card.className = 'strategy-card';
                 card.dataset.id = s.id;
 
+                // 状态映射
+                const statusMap = {
+                    idle: '空闲',
+                    wait_long: '等待做多',
+                    wait_short: '等待做空',
+                    in_long: '持仓多',
+                    in_short: '持仓空'
+                };
+                const statusText = statusMap[s.status] || '未知';
+
                 // 头部
                 let headerHtml = `
                     <div class="row">
@@ -206,8 +221,17 @@
                             <span style="font-weight:600;">${s.name || s.id.slice(0,8)}</span>
                             <span class="badge">${s.symbol}</span>
                             <span class="badge ${s.active ? 'active' : ''}">${s.active ? '运行' : '停止'}</span>
+                            <span class="badge" style="background:#3b4256;">${statusText}</span>
                         </div>
                         <span class="badge ${pos ? (pos.side === 'long' ? 'long' : 'short') : ''}">${pos ? (pos.side === 'long' ? '多' : '空') : '无持仓'}</span>
+                    </div>
+                `;
+
+                // 参数显示
+                const paramsHtml = `
+                    <div style="margin:8px 0; display:flex; gap:12px;">
+                        <span class="param-badge">EMA周期: ${s.emaPeriod || 20}</span>
+                        <span class="param-badge">ATR倍数: ${s.atrMultiplier || 2.0}</span>
                     </div>
                 `;
 
@@ -220,7 +244,7 @@
                     </div>
                 `;
 
-                // 持仓详情（无论有无持仓都显示框架，无持仓时数值为0）
+                // 持仓详情
                 let positionHtml = `
                     <div class="price-row" style="margin:8px 0;">
                         <div class="price-item"><span class="price-label">收益额</span><span class="price-value">${pos ? (pos.unrealizedPnl || 0).toFixed(2) : '0.00'}</span></div>
@@ -261,7 +285,7 @@
                 }
                 tradesHtml += '</ul>';
 
-                card.innerHTML = headerHtml + totalFundsHtml + positionHtml + chartHtml + buttonsHtml + tradesHtml;
+                card.innerHTML = headerHtml + paramsHtml + totalFundsHtml + positionHtml + chartHtml + buttonsHtml + tradesHtml;
                 container.appendChild(card);
 
                 loadKlines(s.id, chartId);
@@ -276,7 +300,6 @@
                 if (data.klines && data.klines.length) {
                     setTimeout(() => renderChart(chartId, data.klines), 200);
                 } else {
-                    // 无K线数据时显示提示
                     if (container) container.innerHTML = '<div style="color:#8a94a8;">暂无K线数据</div>';
                 }
             } catch (err) {
@@ -291,7 +314,7 @@
             if (!container) return;
             container.style.width = '100%';
             container.style.height = '200px';
-            container.innerHTML = ''; // 清空提示
+            container.innerHTML = '';
             if (typeof LightweightCharts === 'undefined') {
                 container.innerHTML = '<div style="color:#f7a8a8;">图表库加载失败</div>';
                 return;
