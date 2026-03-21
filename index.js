@@ -42,22 +42,21 @@ async function fetchKlines(symbol, interval, limit = 2) {
     const res = await axios.get(url);
     if (res.data.code === '0' && res.data.data) {
       return res.data.data.map(item => ({
-        time: parseInt(item[0]),
+        time: parseInt(item[0]),           // 毫秒
         open: parseFloat(item[1]),
         high: parseFloat(item[2]),
         low: parseFloat(item[3]),
         close: parseFloat(item[4]),
         volume: parseFloat(item[5])
-      })).reverse();
+      })).reverse(); // 正序
     }
   } catch (err) {
-    // 忽略单个合约失败
-    return null;
+    console.error('获取K线失败', err.message);
   }
   return null;
 }
 
-// 获取所有永续合约列表（缓存1小时）
+// 获取所有永续合约列表（用于上影线策略，此处保留但本次不修改）
 let instrumentsCache = { data: null, timestamp: 0 };
 async function fetchAllSwapInstruments() {
   const now = Date.now();
@@ -142,29 +141,35 @@ async function closePosition(strategy, account, price, reason = '') {
 }
 
 // ==================== 策略核心 ====================
-// K线之王策略（支持方向与缩量）
+// K线之王策略（修正版，基于新K线出现触发）
 async function runKlineKing(strategy) {
   if (!strategy.config || !strategy.config.active) return;
 
   const { symbol, interval, direction, shrink } = strategy.config;
   const intervalMsVal = intervalMs[interval] || 30 * 60 * 1000;
 
-  // 获取最近3根K线（用于成交量比较）
-  const klines = await fetchKlines(symbol, interval, 3);
-  if (!klines || klines.length < 3) return;
+  // 获取最近2根K线（最新和上一根）
+  const klines = await fetchKlines(symbol, interval, 2);
+  if (!klines || klines.length < 2) return;
 
-  const latestKline = klines[klines.length - 1];
-  const prevKline = klines[klines.length - 2];
-  const prevPrevKline = klines[klines.length - 3]; // 用于缩量比较
+  const latestKline = klines[klines.length - 1]; // 当前未收盘K线
+  const prevKline = klines[klines.length - 2];   // 上一根已收盘K线
 
-  const account = strategy.account;
-  const nowMs = Date.now();
-
-  const prevKlineEndTime = prevKline.time + intervalMsVal;
-  if (prevKlineEndTime > nowMs) return;
+  // 关键改进：使用 lastProcessedKlineTime 记录上一根已处理的K线时间
+  // 如果上一根K线的时间与已处理过的不一致，说明出现了新的已收盘K线，应执行一次策略
   if (strategy.lastProcessedKlineTime === prevKline.time) return;
   strategy.lastProcessedKlineTime = prevKline.time;
 
+  // 获取用于缩量比较的再上一根K线（需要3根K线）
+  let prevPrevKline = null;
+  if (shrink) {
+    const moreKlines = await fetchKlines(symbol, interval, 3);
+    if (moreKlines && moreKlines.length >= 3) {
+      prevPrevKline = moreKlines[moreKlines.length - 3];
+    }
+  }
+
+  const account = strategy.account;
   if (!strategy.state) strategy.state = { status: 'idle' };
   const state = strategy.state;
 
@@ -184,7 +189,7 @@ async function runKlineKing(strategy) {
     }
 
     // 缩量检查
-    const volumeOk = !shrink || (prevKline.volume < prevPrevKline.volume);
+    const volumeOk = !shrink || (prevPrevKline && prevKline.volume < prevPrevKline.volume);
 
     if (state.status === 'wait_long' && prevKline.close > prevKline.open && volumeOk) {
       await openPosition(strategy, account, 'long', prevKline.close, prevKline.time, symbol);
@@ -195,12 +200,13 @@ async function runKlineKing(strategy) {
     // ========== 有持仓 ==========
     const position = account.position;
     const openKlineTime = state.openKlineTime;
+
+    // 判断是否到了平仓时机：开仓后的下一根K线已经收盘（即当前 prevKline 的时间 > 开仓时间 + 一个周期）
     if (prevKline.time >= openKlineTime + intervalMsVal) {
       if (position.side === 'long') {
         if (prevKline.close > prevKline.open) {
           // 止盈平多
           await closePosition(strategy, account, prevKline.close, 'take profit');
-          // 平仓后根据方向设置下一等待方向
           if (direction === 'long') {
             state.status = 'wait_long';
           } else if (direction === 'short') {
@@ -284,7 +290,7 @@ async function runWickAny(strategy) {
     return;
   }
 
-  // 计算收盘前窗口
+  // 收盘前59秒窗口（此处保留原逻辑，不影响K线之王）
   const now = new Date();
   let endTime;
   if (interval.endsWith('m')) {
