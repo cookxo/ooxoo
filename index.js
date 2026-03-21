@@ -25,6 +25,9 @@ const SLIPPAGE_RATE = 0.0003;
 const now = () => Math.floor(Date.now() / 1000);
 
 const intervalMs = {
+  '1m': 60 * 1000,
+  '3m': 3 * 60 * 1000,
+  '5m': 5 * 60 * 1000,
   '15m': 15 * 60 * 1000,
   '30m': 30 * 60 * 1000,
   '1h': 60 * 60 * 1000,
@@ -56,7 +59,7 @@ async function fetchKlines(symbol, interval, limit = 2) {
   return null;
 }
 
-// 获取所有永续合约列表（用于上影线策略，此处保留但本次不修改）
+// 获取所有永续合约列表（用于上影线策略，此处保留）
 let instrumentsCache = { data: null, timestamp: 0 };
 async function fetchAllSwapInstruments() {
   const now = Date.now();
