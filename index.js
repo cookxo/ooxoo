@@ -54,7 +54,7 @@ async function fetchKlines(symbol, interval, limit = 2) {
       })).reverse();
     }
   } catch (err) {
-    console.error('获取K线失败', err.message);
+    console.error(`获取K线失败 ${symbol} ${interval}`, err.message);
   }
   return null;
 }
@@ -120,6 +120,7 @@ async function openPosition(strategy, account, side, price, klineTime, symbol) {
   strategy.state.status = side === 'long' ? 'in_long' : 'in_short';
   strategy.state.openKlineTime = klineTime;
   strategy.state.openSymbol = symbol;
+  strategy.state.barsSinceOpen = 0; // 重置计数器
 }
 
 async function closePosition(strategy, account, price, reason = '') {
@@ -143,21 +144,20 @@ async function closePosition(strategy, account, price, reason = '') {
   return pnl;
 }
 
-// ==================== 策略核心（单根K线反转） ====================
+// ==================== 策略核心（精确版本） ====================
 async function runKlineKing(strategy) {
   if (!strategy.config || !strategy.config.active) return;
 
   const { symbol, interval, direction, shrink } = strategy.config;
-  const intervalMsVal = intervalMs[interval] || 30 * 60 * 1000;
 
-  // 获取最近2根K线（上一根和当前）
+  // 获取最近2根K线（当前未收盘和上一根已收盘）
   const klines = await fetchKlines(symbol, interval, 2);
   if (!klines || klines.length < 2) return;
 
   const latestKline = klines[klines.length - 1]; // 当前未收盘K线
   const prevKline = klines[klines.length - 2];   // 上一根已收盘K线
 
-  // 确保每根K线只处理一次
+  // 检测新K线出现（即上一根K线时间戳变化）
   if (strategy.lastProcessedKlineTime === prevKline.time) return;
   strategy.lastProcessedKlineTime = prevKline.time;
 
@@ -165,70 +165,94 @@ async function runKlineKing(strategy) {
   if (!strategy.state) strategy.state = { status: 'idle' };
   const state = strategy.state;
 
-  // 反转信号：前一根与当前K线方向相反
-  const isBullReversal = (prevKline.close < prevKline.open) && (latestKline.close > latestKline.open); // 阴线后阳线
-  const isBearReversal = (prevKline.close > prevKline.open) && (latestKline.close < latestKline.open); // 阳线后阴线
-
-  // 缩量检查（使用上一根K线与再上一根比较）
+  // 缩量检查（需要3根K线）
   let volumeOk = true;
   if (shrink) {
     const moreKlines = await fetchKlines(symbol, interval, 3);
     if (moreKlines && moreKlines.length >= 3) {
       const prevPrevKline = moreKlines[moreKlines.length - 3];
       volumeOk = prevKline.volume < prevPrevKline.volume;
+    } else {
+      volumeOk = false; // 数据不足时不满足
     }
   }
 
   // ========== 无持仓 ==========
   if (!account.position) {
+    // 反转信号定义
+    const isBullReversal = (prevKline.close < prevKline.open) && (latestKline.close > latestKline.open); // 阴后阳
+    const isBearReversal = (prevKline.close > prevKline.open) && (latestKline.close < latestKline.open); // 阳后阴
+
+    let shouldOpen = false;
+    let openSide = null;
+
     if (direction === 'both' || direction === 'long') {
       if (isBullReversal && volumeOk) {
-        await openPosition(strategy, account, 'long', latestKline.close, latestKline.time, symbol);
-        return; // 开仓后本次处理结束
+        shouldOpen = true;
+        openSide = 'long';
       }
     }
     if (direction === 'both' || direction === 'short') {
       if (isBearReversal && volumeOk) {
-        await openPosition(strategy, account, 'short', latestKline.close, latestKline.time, symbol);
-        return;
+        shouldOpen = true;
+        openSide = 'short';
       }
+    }
+
+    if (shouldOpen) {
+      await openPosition(strategy, account, openSide, latestKline.close, latestKline.time, symbol);
+      console.log(`[${new Date().toISOString()}] 开仓 ${openSide} 价格 ${latestKline.close}`);
     }
   } else {
     // ========== 有持仓 ==========
     const position = account.position;
-    const openKlineTime = state.openKlineTime;
+    // 开仓后经历的K线数（每次新K线出现时加1）
+    state.barsSinceOpen = (state.barsSinceOpen || 0) + 1;
 
-    // 平仓时机：开仓后的下一根K线已经收盘
-    if (prevKline.time >= openKlineTime + intervalMsVal) {
+    // 当开仓后已出现至少1根新K线时，立即平仓
+    if (state.barsSinceOpen >= 1) {
+      // 根据持仓方向和平仓K线（即当前处理的 prevKline）决定操作
       if (position.side === 'long') {
         if (prevKline.close > prevKline.open) {
-          // 第二根收阳 → 止盈平多
+          // 平仓K线为阳线 → 止盈平多
           await closePosition(strategy, account, prevKline.close, 'take profit');
+          console.log(`[${new Date().toISOString()}] 止盈平多 价格 ${prevKline.close}`);
           state.status = 'idle';
+          state.barsSinceOpen = 0;
         } else if (prevKline.close < prevKline.open) {
-          // 第二根收阴 → 止损平多，并立即反手做空
+          // 平仓K线为阴线 → 止损平多，并立即反手做空（如果方向允许）
           await closePosition(strategy, account, prevKline.close, 'stop loss');
+          console.log(`[${new Date().toISOString()}] 止损平多 价格 ${prevKline.close}`);
           if (direction === 'both' || direction === 'short') {
             await openPosition(strategy, account, 'short', prevKline.close, prevKline.time, symbol);
+            console.log(`[${new Date().toISOString()}] 反手开空 价格 ${prevKline.close}`);
           } else {
             state.status = 'idle';
+            state.barsSinceOpen = 0;
           }
         }
       } else if (position.side === 'short') {
         if (prevKline.close < prevKline.open) {
-          // 第二根收阴 → 止盈平空
+          // 平仓K线为阴线 → 止盈平空
           await closePosition(strategy, account, prevKline.close, 'take profit');
+          console.log(`[${new Date().toISOString()}] 止盈平空 价格 ${prevKline.close}`);
           state.status = 'idle';
+          state.barsSinceOpen = 0;
         } else if (prevKline.close > prevKline.open) {
-          // 第二根收阳 → 止损平空，并立即反手做多
+          // 平仓K线为阳线 → 止损平空，并立即反手做多（如果方向允许）
           await closePosition(strategy, account, prevKline.close, 'stop loss');
+          console.log(`[${new Date().toISOString()}] 止损平空 价格 ${prevKline.close}`);
           if (direction === 'both' || direction === 'long') {
             await openPosition(strategy, account, 'long', prevKline.close, prevKline.time, symbol);
+            console.log(`[${new Date().toISOString()}] 反手开多 价格 ${prevKline.close}`);
           } else {
             state.status = 'idle';
+            state.barsSinceOpen = 0;
           }
         }
       }
+      // 平仓后重置计数器
+      state.barsSinceOpen = 0;
     }
   }
 
@@ -245,7 +269,7 @@ async function runKlineKing(strategy) {
   account.markPrice = latestKline.close;
 }
 
-// 全市场最长上影线做空策略（保持不变）
+// 全市场最长上影线做空策略（保持不变，仅用于测试）
 async function runWickAny(strategy) {
   if (!strategy.config || !strategy.config.active) return;
   if (strategy.scanning) return;
@@ -478,11 +502,21 @@ app.post('/strategy/:id/close', async (req, res) => {
   if (!currentPrice) return res.status(500).json({ error: '无法获取价格' });
 
   await closePosition(strategy, account, currentPrice, 'manual');
-  strategy.state.status = 'idle';
+  'manual');
+  strategy.state strategy.state.status = 'idle';
+.status = 'idle';
+  strategy  strategy.state.barsSinceOpen = 0;
+  res.state.barsSinceOpen = 0;
   res.json({ success: true });
 });
 
-app.get('/', (req, res) => res.send('双策略后端运行中'));
+.json({ success: true });
+});
 
-const port = process.env.PORT || 3000;
-app.listen(port, () => console.log(`✅ 服务器运行在端口 ${port}`));
+app.getapp.get('/', (req,('/', ( res) => res.send('req, res) => res.send('双策略后端运行双策略后端运行中'));
+
+const port = process.env.PORT || 中'));
+
+const port = process.env.PORT3000;
+app || 3000;
+app.listen(.listen(port,port, () => () => console.log(`✅ 服务器 console.log(`✅ 服务器运行在端口 ${port}`));
