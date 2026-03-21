@@ -517,7 +517,7 @@
             });
         }
 
-        // 独立的K线图绘制（每次创建新图表，不缓存）
+        // 独立的K线图绘制
         async function loadKlines(strategyId, chartId) {
             try {
                 const res = await fetch(`${API_BASE}/strategy/${strategyId}?user=${USER_ID}`);
@@ -540,7 +540,6 @@
             if (!container) return;
             container.style.width = '100%';
             container.style.height = '200px';
-            // 清空容器，重新创建图表
             container.innerHTML = '';
 
             if (typeof LightweightCharts === 'undefined') {
@@ -581,7 +580,6 @@
                 candleSeries.setData(klines.map(k => ({ time: Math.floor(k.time / 1000), open: k.open, high: k.high, low: k.low, close: k.close })));
 
                 chart.timeScale().fitContent();
-                // 不缓存实例，每次重新创建
                 new ResizeObserver(() => chart.resize(container.clientWidth, 200)).observe(container);
             } catch (err) {
                 console.error('图表绘制错误', err);
