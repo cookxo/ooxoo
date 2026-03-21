@@ -59,7 +59,7 @@ async function fetchKlines(symbol, interval, limit = 2) {
   return null;
 }
 
-// 获取所有永续合约列表（用于上影线策略，不影响K线之王）
+// 获取所有永续合约列表（用于上影线策略）
 let instrumentsCache = { data: null, timestamp: 0 };
 async function fetchAllSwapInstruments() {
   const now = Date.now();
@@ -143,22 +143,21 @@ async function closePosition(strategy, account, price, reason = '') {
   return pnl;
 }
 
-// ==================== 策略核心（严格反转逻辑） ====================
+// ==================== 策略核心（单根K线反转） ====================
 async function runKlineKing(strategy) {
   if (!strategy.config || !strategy.config.active) return;
 
   const { symbol, interval, direction, shrink } = strategy.config;
   const intervalMsVal = intervalMs[interval] || 30 * 60 * 1000;
 
-  // 获取最近3根K线（用于趋势判断）
-  const klines = await fetchKlines(symbol, interval, 3);
-  if (!klines || klines.length < 3) return;
+  // 获取最近2根K线（上一根和当前）
+  const klines = await fetchKlines(symbol, interval, 2);
+  if (!klines || klines.length < 2) return;
 
-  const latestKline = klines[klines.length - 1];   // 当前未收盘K线
-  const prevKline = klines[klines.length - 2];     // 上一根已收盘K线
-  const prevPrevKline = klines[klines.length - 3]; // 上上一根（用于趋势判断）
+  const latestKline = klines[klines.length - 1]; // 当前未收盘K线
+  const prevKline = klines[klines.length - 2];   // 上一根已收盘K线
 
-  // 关键：使用 lastProcessedKlineTime 确保每根K线只处理一次
+  // 确保每根K线只处理一次
   if (strategy.lastProcessedKlineTime === prevKline.time) return;
   strategy.lastProcessedKlineTime = prevKline.time;
 
@@ -166,35 +165,31 @@ async function runKlineKing(strategy) {
   if (!strategy.state) strategy.state = { status: 'idle' };
   const state = strategy.state;
 
-  // 趋势判断
-  const isDownTrend = (prevPrevKline.close < prevPrevKline.open) && (prevKline.close < prevKline.open);
-  const isUpTrend   = (prevPrevKline.close > prevPrevKline.open) && (prevKline.close > prevKline.open);
-  const isBullReversal = isDownTrend && (prevKline.close > prevKline.open);
-  const isBearReversal = isUpTrend   && (prevKline.close < prevKline.open);
+  // 反转信号：前一根与当前K线方向相反
+  const isBullReversal = (prevKline.close < prevKline.open) && (latestKline.close > latestKline.open); // 阴线后阳线
+  const isBearReversal = (prevKline.close > prevKline.open) && (latestKline.close < latestKline.open); // 阳线后阴线
 
-  // 缩量检查
+  // 缩量检查（使用上一根K线与再上一根比较）
   let volumeOk = true;
   if (shrink) {
     const moreKlines = await fetchKlines(symbol, interval, 3);
     if (moreKlines && moreKlines.length >= 3) {
-      const prevPrevVol = moreKlines[moreKlines.length - 3].volume;
-      volumeOk = prevKline.volume < prevPrevVol;
+      const prevPrevKline = moreKlines[moreKlines.length - 3];
+      volumeOk = prevKline.volume < prevPrevKline.volume;
     }
   }
 
   // ========== 无持仓 ==========
   if (!account.position) {
-    // 根据方向决定是否允许开仓
     if (direction === 'both' || direction === 'long') {
       if (isBullReversal && volumeOk) {
-        await openPosition(strategy, account, 'long', prevKline.close, prevKline.time, symbol);
-        // 开仓后设置状态为持仓
-        return;
+        await openPosition(strategy, account, 'long', latestKline.close, latestKline.time, symbol);
+        return; // 开仓后本次处理结束
       }
     }
     if (direction === 'both' || direction === 'short') {
       if (isBearReversal && volumeOk) {
-        await openPosition(strategy, account, 'short', prevKline.close, prevKline.time, symbol);
+        await openPosition(strategy, account, 'short', latestKline.close, latestKline.time, symbol);
         return;
       }
     }
@@ -209,17 +204,13 @@ async function runKlineKing(strategy) {
         if (prevKline.close > prevKline.open) {
           // 第二根收阳 → 止盈平多
           await closePosition(strategy, account, prevKline.close, 'take profit');
-          // 平仓后，根据方向设置后续等待，但反转策略中平仓后应等待反向趋势信号
-          // 这里简单重置状态，让下一次开仓重新根据趋势判断
           state.status = 'idle';
         } else if (prevKline.close < prevKline.open) {
-          // 第二根收阴 → 止损平多，并立即反手做空（用相同资金）
+          // 第二根收阴 → 止损平多，并立即反手做空
           await closePosition(strategy, account, prevKline.close, 'stop loss');
-          // 反手开空（符合规则）
           if (direction === 'both' || direction === 'short') {
             await openPosition(strategy, account, 'short', prevKline.close, prevKline.time, symbol);
           } else {
-            // 如果方向不允许反手，则只重置状态
             state.status = 'idle';
           }
         }
