@@ -12,18 +12,19 @@ app.use((req, res, next) => {
 });
 app.use(express.json());
 
-// ==================== 内存存储 ====================
+// 内存存储
 const userData = {};
 const USER_ID = 'demo_user';
 const DEFAULT_BALANCE = 10000;
 if (!userData[USER_ID]) userData[USER_ID] = { strategies: {} };
 
-// ==================== 常量 ====================
+// 常量
 const OKX_API_BASE = 'https://www.okx.com';
 const TAKER_FEE_RATE = 0.0005;
 const SLIPPAGE_RATE = 0.0003;
 const now = () => Math.floor(Date.now() / 1000);
 
+// 周期对应的毫秒数
 const intervalMs = {
   '1m': 60 * 1000,
   '3m': 3 * 60 * 1000,
@@ -44,8 +45,9 @@ async function fetchKlines(symbol, interval, limit = 2) {
     const url = `${OKX_API_BASE}/api/v5/market/candles?instId=${symbol}&bar=${interval}&limit=${limit}`;
     const res = await axios.get(url);
     if (res.data.code === '0' && res.data.data) {
+      // 返回正序数组（最早的在前面）
       return res.data.data.map(item => ({
-        time: parseInt(item[0]),
+        time: parseInt(item[0]),           // K线开始时间（毫秒）
         open: parseFloat(item[1]),
         high: parseFloat(item[2]),
         low: parseFloat(item[3]),
@@ -120,7 +122,7 @@ async function openPosition(strategy, account, side, price, klineTime, symbol) {
   strategy.state.status = side === 'long' ? 'in_long' : 'in_short';
   strategy.state.openKlineTime = klineTime;
   strategy.state.openSymbol = symbol;
-  strategy.state.barsSinceOpen = 0; // 重置计数器
+  strategy.state.barsSinceOpen = 0; // 开仓后经历的K线数
 }
 
 async function closePosition(strategy, account, price, reason = '') {
@@ -144,20 +146,28 @@ async function closePosition(strategy, account, price, reason = '') {
   return pnl;
 }
 
-// ==================== 策略核心（精确版本） ====================
+// ==================== 策略核心（严格按收盘时间） ====================
 async function runKlineKing(strategy) {
   if (!strategy.config || !strategy.config.active) return;
 
   const { symbol, interval, direction, shrink } = strategy.config;
+  const intervalMsVal = intervalMs[interval];
+  if (!intervalMsVal) return;
 
-  // 获取最近2根K线（当前未收盘和上一根已收盘）
+  // 获取最近2根K线
   const klines = await fetchKlines(symbol, interval, 2);
   if (!klines || klines.length < 2) return;
 
-  const latestKline = klines[klines.length - 1]; // 当前未收盘K线
-  const prevKline = klines[klines.length - 2];   // 上一根已收盘K线
+  const latestKline = klines[klines.length - 1]; // 当前未收盘K线（开始时间）
+  const prevKline = klines[klines.length - 2];   // 上一根K线（开始时间）
 
-  // 检测新K线出现（即上一根K线时间戳变化）
+  const nowMs = Date.now();
+  const prevKlineEndTime = prevKline.time + intervalMsVal; // 上一根K线结束时间
+
+  // 1. 检查上一根K线是否已收盘（当前时间 >= 其结束时间）
+  if (nowMs < prevKlineEndTime) return; // 未收盘，不处理
+
+  // 2. 避免重复处理同一根K线
   if (strategy.lastProcessedKlineTime === prevKline.time) return;
   strategy.lastProcessedKlineTime = prevKline.time;
 
@@ -173,15 +183,31 @@ async function runKlineKing(strategy) {
       const prevPrevKline = moreKlines[moreKlines.length - 3];
       volumeOk = prevKline.volume < prevPrevKline.volume;
     } else {
-      volumeOk = false; // 数据不足时不满足
+      volumeOk = false;
     }
   }
 
   // ========== 无持仓 ==========
   if (!account.position) {
-    // 反转信号定义
-    const isBullReversal = (prevKline.close < prevKline.open) && (latestKline.close > latestKline.open); // 阴后阳
-    const isBearReversal = (prevKline.close > prevKline.open) && (latestKline.close < latestKline.open); // 阳后阴
+    // 反转信号定义（基于上一根已收盘K线 prevKline 和当前未收盘K线 latestKline）
+    // 注意：当前未收盘K线的阴阳是实时变化的，我们使用其当前 close 与 open 比较，但只有当它收盘后才成为已收盘K线
+    // 但在开仓时，我们只关心 prevKline 的信号，因为只有它已经收盘，所以反转信号应基于 prevKline 和更早的K线？
+    // 根据您的规则：反转信号是“前一根K线与当前K线方向相反”。这里的“当前K线”是指最近一根已收盘的K线（即上一根已收盘K线），而最新未收盘K线还未形成最终阴阳，不能作为信号。
+    // 所以我们应该获取三根K线：前两根已收盘，第三根当前未收盘。信号基于前两根已收盘K线。
+    // 修改为获取3根K线，取前两根已收盘的K线判断反转。
+    const threeKlines = await fetchKlines(symbol, interval, 3);
+    if (!threeKlines || threeKlines.length < 3) return;
+    const prevPrevKline = threeKlines[threeKlines.length - 3]; // 更早一根
+    const prevKline = threeKlines[threeKlines.length - 2];     // 上一根已收盘
+    const latestKline = threeKlines[threeKlines.length - 1];   // 当前未收盘（可能未收盘）
+
+    // 确保 prevPrevKline 和 prevKline 都已收盘（时间判断）
+    const prevPrevEnd = prevPrevKline.time + intervalMsVal;
+    const prevEnd = prevKline.time + intervalMsVal;
+    if (nowMs < prevPrevEnd || nowMs < prevEnd) return; // 还未收盘，不能作为信号
+
+    const isBullReversal = (prevPrevKline.close < prevPrevKline.open) && (prevKline.close > prevKline.open); // 下跌后阳线
+    const isBearReversal = (prevPrevKline.close > prevPrevKline.open) && (prevKline.close < prevKline.open); // 上涨后阴线
 
     let shouldOpen = false;
     let openSide = null;
@@ -200,16 +226,18 @@ async function runKlineKing(strategy) {
     }
 
     if (shouldOpen) {
-      await openPosition(strategy, account, openSide, latestKline.close, latestKline.time, symbol);
-      console.log(`[${new Date().toISOString()}] 开仓 ${openSide} 价格 ${latestKline.close}`);
+      // 使用上一根已收盘K线的收盘价作为开仓价
+      await openPosition(strategy, account, openSide, prevKline.close, prevKline.time, symbol);
+      console.log(`[${new Date().toISOString()}] 开仓 ${openSide} 价格 ${prevKline.close}`);
     }
   } else {
     // ========== 有持仓 ==========
+    // 此时 prevKline 是上一根已收盘K线（已确保收盘）
     const position = account.position;
     // 开仓后经历的K线数（每次新K线出现时加1）
     state.barsSinceOpen = (state.barsSinceOpen || 0) + 1;
 
-    // 当开仓后已出现至少1根新K线时，立即平仓
+    // 当开仓后已出现至少1根新K线时，立即平仓（即持有一根K线后平仓）
     if (state.barsSinceOpen >= 1) {
       // 根据持仓方向和平仓K线（即当前处理的 prevKline）决定操作
       if (position.side === 'long') {
@@ -255,21 +283,25 @@ async function runKlineKing(strategy) {
     }
   }
 
-  // 更新未实现盈亏
-  if (account.position) {
-    const upnl = account.position.side === 'long'
-      ? (latestKline.close - account.position.entryPrice) * account.position.size
-      : (account.position.entryPrice - latestKline.close) * account.position.size;
-    account.position.unrealizedPnl = upnl;
-    account.equity = account.balance + upnl;
-  } else {
-    account.equity = account.balance;
+  // 更新未实现盈亏（使用最新K线的收盘价作为标记价格）
+  const latestKlineForPnl = (await fetchKlines(symbol, interval, 1))?.[0];
+  if (latestKlineForPnl) {
+    if (account.position) {
+      const upnl = account.position.side === 'long'
+        ? (latestKlineForPnl.close - account.position.entryPrice) * account.position.size
+        : (account.position.entryPrice - latestKlineForPnl.close) * account.position.size;
+      account.position.unrealizedPnl = upnl;
+      account.equity = account.balance + upnl;
+    } else {
+      account.equity = account.balance;
+    }
+    account.markPrice = latestKlineForPnl.close;
   }
-  account.markPrice = latestKline.close;
 }
 
-// 全市场最长上影线做空策略（保持兼容）
+// 全市场最长上影线做空策略（保持兼容，但本次未修改）
 async function runWickAny(strategy) {
+  // ... 与之前相同，略（可沿用之前的代码，但为了完整，此处保留占位）
   if (!strategy.config || !strategy.config.active) return;
   if (strategy.scanning) return;
 
