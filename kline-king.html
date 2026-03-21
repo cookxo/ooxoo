@@ -297,11 +297,9 @@
     <div id="strategy-list"></div>
 
     <script>
-        const API_BASE = 'https://ooxoo-production.up.railway.app';
+        const API_BASE = 'https://ooxoo-production.up.railway.app'; // ⚠️ 请确认是否为您的实际域名
         const USER_ID = 'demo_user';
         const STRATEGY_TYPE = 'kline_king';
-
-        let currentStrategies = [];
 
         // 交易对切换
         const symbolSelect = document.getElementById('newSymbolSelect');
@@ -354,22 +352,21 @@
                 symbolSelect.value = 'BTC-USDT-SWAP';
                 updateSymbol();
                 loadStrategies();
-            } else alert('创建失败');
+            } else {
+                const err = await res.text();
+                alert('创建失败: ' + err);
+            }
         });
 
         async function loadStrategies() {
             try {
                 const res = await fetch(`${API_BASE}/strategies?user=${USER_ID}`);
-                const newStrategies = await res.json();
-                const filtered = newStrategies.filter(s => s.type === STRATEGY_TYPE);
+                const strategies = await res.json();
+                const filtered = strategies.filter(s => s.type === STRATEGY_TYPE);
+                renderStrategies(filtered);
                 updateTotal(filtered);
-                if (currentStrategies.length === 0) {
-                    renderStrategies(filtered);
-                } else {
-                    updateStrategyCards(filtered);
-                }
-                currentStrategies = filtered;
             } catch (err) {
+                console.error(err);
                 document.getElementById('strategy-list').innerHTML = '<div class="card">加载失败</div>';
             }
         }
@@ -410,16 +407,24 @@
             }
         }
 
-        function updateStrategyCards(newStrategies) {
-            newStrategies.forEach(newS => {
-                const card = document.querySelector(`.strategy-card[data-id="${newS.id}"]`);
-                if (!card) return;
+        function renderStrategies(strategies) {
+            const container = document.getElementById('strategy-list');
+            if (!strategies.length) {
+                container.innerHTML = '<div class="card">暂无策略，点击上方创建</div>';
+                return;
+            }
+            container.innerHTML = '';
+            strategies.forEach(s => {
+                const pos = s.position;
+                const card = document.createElement('div');
+                card.className = 'strategy-card';
+                card.dataset.id = s.id;
 
-                const pos = newS.position;
                 const directionMap = { long: '多', short: '空', both: '双向' };
-                const directionText = directionMap[newS.direction] || '双向';
-                const shrinkText = newS.shrink ? '缩量' : '';
+                const directionText = directionMap[s.direction] || '双向';
+                const shrinkText = s.shrink ? '缩量' : '';
                 const modeDisplay = shrinkText ? `${directionText}+${shrinkText}` : directionText;
+
                 const statusMap = {
                     idle: '空闲',
                     wait_long: '等待做多',
@@ -427,51 +432,31 @@
                     in_long: '持仓多',
                     in_short: '持仓空'
                 };
-                const statusText = statusMap[newS.status] || '未知';
+                const statusText = statusMap[s.status] || '未知';
 
-                // 更新头部
-                const headerDiv = card.querySelector('.card-header');
-                if (headerDiv) {
-                    const leftDiv = headerDiv.children[0];
-                    if (leftDiv) {
-                        const nameSpan = leftDiv.querySelector('span:first-child');
-                        if (nameSpan) nameSpan.innerText = newS.name || newS.id.slice(0,8);
-                        const badges = leftDiv.querySelectorAll('.badge');
-                        if (badges.length >= 3) {
-                            badges[0].innerText = newS.symbol;
-                            badges[1].innerText = modeDisplay;
-                            badges[2].innerText = newS.active ? '运行' : '停止';
-                            badges[2].className = `badge ${newS.active ? 'active' : ''}`;
-                            if (badges[3]) badges[3].innerText = statusText;
-                        }
-                    }
-                    const rightBadge = headerDiv.querySelector('.badge:last-child');
-                    if (rightBadge) {
-                        if (pos) {
-                            rightBadge.innerText = pos.side === 'long' ? '多' : '空';
-                            rightBadge.className = `badge ${pos.side === 'long' ? 'long' : 'short'}`;
-                        } else {
-                            rightBadge.innerText = newS.status === 'wait_long' ? '等待做多' : (newS.status === 'wait_short' ? '等待做空' : '空闲');
-                            rightBadge.className = 'badge';
-                        }
-                    }
-                }
+                let headerHtml = `
+                    <div class="card-header">
+                        <div>
+                            <span style="font-weight:600;">${s.name || s.id.slice(0,8)}</span>
+                            <span class="badge">${s.symbol}</span>
+                            <span class="badge">${modeDisplay}</span>
+                            <span class="badge ${s.active ? 'active' : ''}">${s.active ? '运行' : '停止'}</span>
+                            <span class="badge">${statusText}</span>
+                        </div>
+                        <span class="badge ${pos ? (pos.side === 'long' ? 'long' : 'short') : ''}">${pos ? (pos.side === 'long' ? '多' : '空') : (s.status === 'wait_long' ? '等待做多' : (s.status === 'wait_short' ? '等待做空' : '空闲'))}</span>
+                    </div>
+                `;
 
-                // 更新资金总额
-                const fundsDiv = card.querySelector('.strategy-card > div:nth-of-type(2)');
-                if (fundsDiv) {
-                    const equitySpan = fundsDiv.querySelector('.pos-value:first-child');
-                    if (equitySpan) equitySpan.innerText = newS.equity.toFixed(2);
-                    const returnSpan = fundsDiv.querySelector('.pos-value:last-child');
-                    const strategyReturn = ((newS.equity - 10000) / 10000 * 100).toFixed(2);
-                    if (returnSpan) {
-                        returnSpan.innerText = `${strategyReturn}%`;
-                        if (strategyReturn >= 0) returnSpan.classList.add('positive');
-                        else returnSpan.classList.add('negative');
-                    }
-                }
+                const strategyReturn = ((s.equity - 10000) / 10000 * 100).toFixed(2);
+                const fundsHtml = `
+                    <div style="background: #0f1420; border-radius: 16px; padding: 12px; margin: 12px 0;">
+                        <div class="flex-between">
+                            <div><span class="pos-label">资金总额</span><div class="pos-value">${s.equity.toFixed(2)} USDT</div></div>
+                            <div><span class="pos-label">策略收益率</span><div class="pos-value ${strategyReturn >= 0 ? 'positive' : 'negative'}">${strategyReturn}%</div></div>
+                        </div>
+                    </div>
+                `;
 
-                // 更新持仓区域
                 let positionHtml = '';
                 if (pos) {
                     positionHtml = `
@@ -484,190 +469,58 @@
                         </div>
                         <div class="price-grid">
                             <div class="pos-item"><div class="pos-label">开仓均价</div><div class="pos-value">${pos.entryPrice.toFixed(2)}</div></div>
-                            <div class="pos-item"><div class="pos-label">标记价格</div><div class="pos-value">${(newS.markPrice || 0).toFixed(2)}</div></div>
+                            <div class="pos-item"><div class="pos-label">标记价格</div><div class="pos-value">${(s.markPrice || 0).toFixed(2)}</div></div>
                             <div class="pos-item"><div class="pos-label">预估强平价</div><div class="pos-value">${(pos.entryPrice * (1 - 0.05)).toFixed(2)}</div></div>
                         </div>
                     `;
                 } else {
                     let statusMsg = '';
-                    if (newS.status === 'wait_long') statusMsg = '等待做多';
-                    else if (newS.status === 'wait_short') statusMsg = '等待做空';
+                    if (s.status === 'wait_long') statusMsg = '等待做多';
+                    else if (s.status === 'wait_short') statusMsg = '等待做空';
                     else statusMsg = '空闲';
                     positionHtml = `<div class="status-message">${statusMsg}</div>`;
                 }
-                const existingPos = card.querySelector('.position-grid, .price-grid, .status-message');
-                if (existingPos) {
-                    const parent = existingPos.parentNode;
-                    const temp = document.createElement('div');
-                    temp.innerHTML = positionHtml;
-                    parent.replaceChild(temp.firstChild, existingPos);
-                }
 
-                // 更新按钮（市价全平按钮）
-                const buttonsDiv = card.querySelector('.flex-between');
-                if (buttonsDiv) {
-                    const closeBtn = buttonsDiv.querySelector('button.red:not(:last-child)');
-                    if (pos) {
-                        if (!closeBtn) {
-                            const newBtn = document.createElement('button');
-                            newBtn.className = 'small red';
-                            newBtn.innerText = '市价全平';
-                            newBtn.onclick = () => closePosition(newS.id);
-                            buttonsDiv.insertBefore(newBtn, buttonsDiv.children[1]);
-                        }
-                    } else {
-                        if (closeBtn) closeBtn.remove();
-                    }
-                }
+                const chartId = `chart-${s.id}`;
+                const chartHtml = `<div id="${chartId}" class="chart-container"></div>`;
 
-                // 更新交易记录
-                const tradeListUl = card.querySelector('.trade-list');
-                if (tradeListUl) {
-                    if (newS.history && newS.history.length) {
-                        let newHtml = '';
-                        newS.history.slice().reverse().forEach(t => {
-                            const timeStr = new Date(t.time * 1000).toLocaleString('zh-CN', { hour12: false });
-                            const sign = t.pnl >= 0 ? '+' : '';
-                            newHtml += `<li class="trade-item"><span>${timeStr} ${t.type==='open'?'开':'平'} ${t.side==='long'?'多':'空'} ${t.size.toFixed(4)} @ ${t.price.toFixed(2)}</span><span class="${t.pnl>=0?'positive':'negative'}">${sign}${(t.pnl||0).toFixed(2)}</span></li>`;
-                        });
-                        tradeListUl.innerHTML = newHtml;
-                    } else {
-                        tradeListUl.innerHTML = '<li class="trade-item" style="justify-content:center;">暂无交易</li>';
-                    }
-                    // 更新复制按钮事件
-                    const copyBtn = card.querySelector('.copy-btn');
-                    if (copyBtn) {
-                        copyBtn.onclick = () => copyTrades(newS.history, newS.name || newS.id.slice(0,8));
-                    }
-                }
-
-                // 更新K线图（只更新数据，不重建）
-                loadKlines(newS.id, `chart-${newS.id}`);
-            });
-        }
-
-        function renderStrategies(strategies) {
-            const container = document.getElementById('strategy-list');
-            if (!strategies.length) {
-                container.innerHTML = '<div class="card">暂无策略，点击上方创建</div>';
-                return;
-            }
-            container.innerHTML = '';
-            strategies.forEach(s => {
-                const card = document.createElement('div');
-                card.className = 'strategy-card';
-                card.dataset.id = s.id;
-                renderStrategyCardContent(card, s);
-                container.appendChild(card);
-                loadKlines(s.id, `chart-${s.id}`);
-            });
-        }
-
-        function renderStrategyCardContent(card, s) {
-            const pos = s.position;
-            const directionMap = { long: '多', short: '空', both: '双向' };
-            const directionText = directionMap[s.direction] || '双向';
-            const shrinkText = s.shrink ? '缩量' : '';
-            const modeDisplay = shrinkText ? `${directionText}+${shrinkText}` : directionText;
-
-            const statusMap = {
-                idle: '空闲',
-                wait_long: '等待做多',
-                wait_short: '等待做空',
-                in_long: '持仓多',
-                in_short: '持仓空'
-            };
-            const statusText = statusMap[s.status] || '未知';
-
-            let headerHtml = `
-                <div class="card-header">
-                    <div>
-                        <span style="font-weight:600;">${s.name || s.id.slice(0,8)}</span>
-                        <span class="badge">${s.symbol}</span>
-                        <span class="badge">${modeDisplay}</span>
-                        <span class="badge ${s.active ? 'active' : ''}">${s.active ? '运行' : '停止'}</span>
-                        <span class="badge">${statusText}</span>
-                    </div>
-                    <span class="badge ${pos ? (pos.side === 'long' ? 'long' : 'short') : ''}">${pos ? (pos.side === 'long' ? '多' : '空') : (s.status === 'wait_long' ? '等待做多' : (s.status === 'wait_short' ? '等待做空' : '空闲'))}</span>
-                </div>
-            `;
-
-            const strategyReturn = ((s.equity - 10000) / 10000 * 100).toFixed(2);
-            const fundsHtml = `
-                <div style="background: #0f1420; border-radius: 16px; padding: 12px; margin: 12px 0;">
-                    <div class="flex-between">
-                        <div><span class="pos-label">资金总额</span><div class="pos-value">${s.equity.toFixed(2)} USDT</div></div>
-                        <div><span class="pos-label">策略收益率</span><div class="pos-value ${strategyReturn >= 0 ? 'positive' : 'negative'}">${strategyReturn}%</div></div>
-                    </div>
-                </div>
-            `;
-
-            let positionHtml = '';
-            if (pos) {
-                positionHtml = `
-                    <div class="position-grid">
-                        <div class="pos-item"><div class="pos-label">收益额</div><div class="pos-value ${pos.unrealizedPnl >= 0 ? 'positive' : 'negative'}">${(pos.unrealizedPnl || 0).toFixed(2)}</div></div>
-                        <div class="pos-item"><div class="pos-label">收益率</div><div class="pos-value ${pos.unrealizedPnl >= 0 ? 'positive' : 'negative'}">${((pos.unrealizedPnl / (pos.size * pos.entryPrice / pos.leverage) * 100) || 0).toFixed(2)}%</div></div>
-                        <div class="pos-item"><div class="pos-label">持仓量</div><div class="pos-value">${(pos.size * pos.entryPrice).toFixed(2)}</div></div>
-                        <div class="pos-item"><div class="pos-label">保证金</div><div class="pos-value">${(pos.margin || 0).toFixed(2)}</div></div>
-                        <div class="pos-item"><div class="pos-label">杠杆</div><div class="pos-value">${pos.leverage}x</div></div>
-                    </div>
-                    <div class="price-grid">
-                        <div class="pos-item"><div class="pos-label">开仓均价</div><div class="pos-value">${pos.entryPrice.toFixed(2)}</div></div>
-                        <div class="pos-item"><div class="pos-label">标记价格</div><div class="pos-value">${(s.markPrice || 0).toFixed(2)}</div></div>
-                        <div class="pos-item"><div class="pos-label">预估强平价</div><div class="pos-value">${(pos.entryPrice * (1 - 0.05)).toFixed(2)}</div></div>
+                const buttonsHtml = `
+                    <div class="flex-between" style="margin-top: 12px;">
+                        <button class="small ${s.active ? 'red' : 'green'}" onclick="toggleStrategy('${s.id}', ${!s.active})" style="flex:1; margin-right: 8px;">${s.active ? '停止' : '启动'}</button>
+                        ${pos ? `<button class="small red" onclick="closePosition('${s.id}')" style="flex:1; margin-right: 8px;">市价全平</button>` : ''}
+                        <button class="small red" onclick="deleteStrategy('${s.id}')" style="flex:1;">删除</button>
                     </div>
                 `;
-            } else {
-                let statusMsg = '';
-                if (s.status === 'wait_long') statusMsg = '等待做多';
-                else if (s.status === 'wait_short') statusMsg = '等待做空';
-                else statusMsg = '空闲';
-                positionHtml = `<div class="status-message">${statusMsg}</div>`;
-            }
 
-            const chartId = `chart-${s.id}`;
-            const chartHtml = `<div id="${chartId}" class="chart-container"></div>`;
+                let tradesHtml = `
+                    <div class="pos-label" style="margin: 12px 0 4px;">所有交易记录</div>
+                    <ul class="trade-list">
+                `;
+                if (s.history && s.history.length) {
+                    s.history.slice().reverse().forEach(t => {
+                        const timeStr = new Date(t.time * 1000).toLocaleString('zh-CN', { hour12: false });
+                        const sign = t.pnl >= 0 ? '+' : '';
+                        tradesHtml += `<li class="trade-item"><span>${timeStr} ${t.type==='open'?'开':'平'} ${t.side==='long'?'多':'空'} ${t.size.toFixed(4)} @ ${t.price.toFixed(2)}</span><span class="${t.pnl>=0?'positive':'negative'}">${sign}${(t.pnl||0).toFixed(2)}</span></li>`;
+                    });
+                } else {
+                    tradesHtml += '<li class="trade-item" style="justify-content:center;">暂无交易</li>';
+                }
+                tradesHtml += `</ul>`;
+                tradesHtml += `<div style="display: flex; justify-content: flex-end;"><button class="copy-btn" onclick="copyTrades(${JSON.stringify(s.history).replace(/"/g, '&quot;')}, '${(s.name || s.id.slice(0,8))}')">📋 一键复制交易记录</button></div>`;
 
-            const buttonsHtml = `
-                <div class="flex-between" style="margin-top: 12px;">
-                    <button class="small ${s.active ? 'red' : 'green'}" onclick="toggleStrategy('${s.id}', ${!s.active})" style="flex:1; margin-right: 8px;">${s.active ? '停止' : '启动'}</button>
-                    ${pos ? `<button class="small red" onclick="closePosition('${s.id}')" style="flex:1; margin-right: 8px;">市价全平</button>` : ''}
-                    <button class="small red" onclick="deleteStrategy('${s.id}')" style="flex:1;">删除</button>
-                </div>
-            `;
-
-            let tradesHtml = `
-                <div class="pos-label" style="margin: 12px 0 4px;">所有交易记录</div>
-                <ul class="trade-list">
-            `;
-            if (s.history && s.history.length) {
-                s.history.slice().reverse().forEach(t => {
-                    const timeStr = new Date(t.time * 1000).toLocaleString('zh-CN', { hour12: false });
-                    const sign = t.pnl >= 0 ? '+' : '';
-                    tradesHtml += `<li class="trade-item"><span>${timeStr} ${t.type==='open'?'开':'平'} ${t.side==='long'?'多':'空'} ${t.size.toFixed(4)} @ ${t.price.toFixed(2)}</span><span class="${t.pnl>=0?'positive':'negative'}">${sign}${(t.pnl||0).toFixed(2)}</span></li>`;
-                });
-            } else {
-                tradesHtml += '<li class="trade-item" style="justify-content:center;">暂无交易</li>';
-            }
-            tradesHtml += `</ul>`;
-            tradesHtml += `<div style="display: flex; justify-content: flex-end;"><button class="copy-btn" onclick="copyTrades(${JSON.stringify(s.history).replace(/"/g, '&quot;')}, '${(s.name || s.id.slice(0,8))}')">📋 一键复制交易记录</button></div>`;
-
-            card.innerHTML = headerHtml + fundsHtml + positionHtml + chartHtml + buttonsHtml + tradesHtml;
+                card.innerHTML = headerHtml + fundsHtml + positionHtml + chartHtml + buttonsHtml + tradesHtml;
+                container.appendChild(card);
+                loadKlines(s.id, chartId);
+            });
         }
 
-        const chartInstances = {};
-
+        // 独立的K线图绘制（每次创建新图表，不缓存）
         async function loadKlines(strategyId, chartId) {
             try {
                 const res = await fetch(`${API_BASE}/strategy/${strategyId}?user=${USER_ID}`);
                 const data = await res.json();
                 if (data.klines && data.klines.length) {
-                    if (chartInstances[chartId]) {
-                        updateChartData(chartId, data.klines);
-                    } else {
-                        renderChart(chartId, data.klines);
-                    }
+                    setTimeout(() => renderChart(chartId, data.klines), 50);
                 } else {
                     const container = document.getElementById(chartId);
                     if (container) container.innerHTML = '<div style="color:#8e9ab0; text-align:center; line-height:200px;">暂无K线数据</div>';
@@ -679,29 +532,13 @@
             }
         }
 
-        function updateChartData(containerId, klines) {
-            const inst = chartInstances[containerId];
-            if (!inst) return;
-            const { chart, candleSeries, volumeSeries, emaSeries } = inst;
-            const adapted = klines.map(k => ({ time: Math.floor(k.time / 1000), open: k.open, high: k.high, low: k.low, close: k.close }));
-            candleSeries.setData(adapted);
-
-            const closes = klines.map(k => k.close);
-            const ema9 = calculateEMA(closes, 9);
-            const emaData = klines.map((k, i) => ({ time: Math.floor(k.time / 1000), value: ema9[i] })).filter(d => d.value !== undefined);
-            emaSeries.setData(emaData);
-
-            const volumeData = klines.map(k => ({ time: Math.floor(k.time / 1000), value: k.volume, color: k.close > k.open ? '#8ce99a' : '#f7a8a8' }));
-            volumeSeries.setData(volumeData);
-
-            chart.timeScale().fitContent();
-        }
-
         function renderChart(containerId, klines) {
             const container = document.getElementById(containerId);
             if (!container) return;
             container.style.width = '100%';
             container.style.height = '200px';
+            // 清空容器，重新创建图表
+            container.innerHTML = '';
 
             if (typeof LightweightCharts === 'undefined') {
                 container.innerHTML = '<div style="color:#f7a8a8; text-align:center; line-height:200px;">图表库加载失败</div>';
@@ -741,7 +578,7 @@
                 candleSeries.setData(klines.map(k => ({ time: Math.floor(k.time / 1000), open: k.open, high: k.high, low: k.low, close: k.close })));
 
                 chart.timeScale().fitContent();
-                chartInstances[containerId] = { chart, candleSeries, volumeSeries, emaSeries };
+                // 不缓存实例，每次重新创建
                 new ResizeObserver(() => chart.resize(container.clientWidth, 200)).observe(container);
             } catch (err) {
                 console.error('图表绘制错误', err);
