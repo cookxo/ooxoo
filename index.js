@@ -251,8 +251,7 @@ async function runKlineKing(strategy) {
           }
         }
       }
-      // 平仓后重置计数器
-      state.barsSinceOpen = 0;
+      // 平仓后重置计数器（已在各分支内重置）
     }
   }
 
@@ -269,7 +268,7 @@ async function runKlineKing(strategy) {
   account.markPrice = latestKline.close;
 }
 
-// 全市场最长上影线做空策略（保持不变，仅用于测试）
+// 全市场最长上影线做空策略（保持兼容）
 async function runWickAny(strategy) {
   if (!strategy.config || !strategy.config.active) return;
   if (strategy.scanning) return;
@@ -502,21 +501,12 @@ app.post('/strategy/:id/close', async (req, res) => {
   if (!currentPrice) return res.status(500).json({ error: '无法获取价格' });
 
   await closePosition(strategy, account, currentPrice, 'manual');
-  'manual');
-  strategy.state strategy.state.status = 'idle';
-.status = 'idle';
-  strategy  strategy.state.barsSinceOpen = 0;
-  res.state.barsSinceOpen = 0;
+  strategy.state.status = 'idle';
+  strategy.state.barsSinceOpen = 0;
   res.json({ success: true });
 });
 
-.json({ success: true });
-});
+app.get('/', (req, res) => res.send('双策略后端运行中'));
 
-app.getapp.get('/', (req,('/', ( res) => res.send('req, res) => res.send('双策略后端运行双策略后端运行中'));
-
-const port = process.env.PORT || 中'));
-
-const port = process.env.PORT3000;
-app || 3000;
-app.listen(.listen(port,port, () => () => console.log(`✅ 服务器 console.log(`✅ 服务器运行在端口 ${port}`));
+const port = process.env.PORT || 3000;
+app.listen(port, () => console.log(`✅ 服务器运行在端口 ${port}`));
