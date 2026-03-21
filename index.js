@@ -12,11 +12,13 @@ app.use((req, res, next) => {
 });
 app.use(express.json());
 
+// ==================== 内存存储 ====================
 const userData = {};
 const USER_ID = 'demo_user';
 const DEFAULT_BALANCE = 10000;
 if (!userData[USER_ID]) userData[USER_ID] = { strategies: {} };
 
+// ==================== 常量 ====================
 const OKX_API_BASE = 'https://www.okx.com';
 const TAKER_FEE_RATE = 0.0005;
 const SLIPPAGE_RATE = 0.0003;
@@ -49,6 +51,7 @@ async function fetchKlines(symbol, interval, limit = 2) {
       })).reverse();
     }
   } catch (err) {
+    // 忽略单个合约失败
     return null;
   }
   return null;
@@ -139,18 +142,21 @@ async function closePosition(strategy, account, price, reason = '') {
 }
 
 // ==================== 策略核心 ====================
-// K线之王策略（原样不变）
+// K线之王策略（支持方向与缩量）
 async function runKlineKing(strategy) {
   if (!strategy.config || !strategy.config.active) return;
 
-  const { symbol, interval } = strategy.config;
+  const { symbol, interval, direction, shrink } = strategy.config;
   const intervalMsVal = intervalMs[interval] || 30 * 60 * 1000;
 
-  const klines = await fetchKlines(symbol, interval, 2);
-  if (!klines || klines.length < 2) return;
+  // 获取最近3根K线（用于成交量比较）
+  const klines = await fetchKlines(symbol, interval, 3);
+  if (!klines || klines.length < 3) return;
 
   const latestKline = klines[klines.length - 1];
   const prevKline = klines[klines.length - 2];
+  const prevPrevKline = klines[klines.length - 3]; // 用于缩量比较
+
   const account = strategy.account;
   const nowMs = Date.now();
 
@@ -162,39 +168,84 @@ async function runKlineKing(strategy) {
   if (!strategy.state) strategy.state = { status: 'idle' };
   const state = strategy.state;
 
+  // ========== 无持仓 ==========
   if (!account.position) {
     if (state.status === 'idle') {
-      if (prevKline.close < prevKline.open) state.status = 'wait_long';
-      else if (prevKline.close > prevKline.open) state.status = 'wait_short';
-    } else if (state.status === 'wait_long' && prevKline.close > prevKline.open) {
+      // 根据方向决定初始等待状态
+      if (direction === 'long') {
+        state.status = 'wait_long';
+      } else if (direction === 'short') {
+        state.status = 'wait_short';
+      } else {
+        // 双向模式
+        if (prevKline.close < prevKline.open) state.status = 'wait_long';
+        else if (prevKline.close > prevKline.open) state.status = 'wait_short';
+      }
+    }
+
+    // 缩量检查
+    const volumeOk = !shrink || (prevKline.volume < prevPrevKline.volume);
+
+    if (state.status === 'wait_long' && prevKline.close > prevKline.open && volumeOk) {
       await openPosition(strategy, account, 'long', prevKline.close, prevKline.time, symbol);
-    } else if (state.status === 'wait_short' && prevKline.close < prevKline.open) {
+    } else if (state.status === 'wait_short' && prevKline.close < prevKline.open && volumeOk) {
       await openPosition(strategy, account, 'short', prevKline.close, prevKline.time, symbol);
     }
   } else {
+    // ========== 有持仓 ==========
     const position = account.position;
     const openKlineTime = state.openKlineTime;
     if (prevKline.time >= openKlineTime + intervalMsVal) {
       if (position.side === 'long') {
         if (prevKline.close > prevKline.open) {
+          // 止盈平多
           await closePosition(strategy, account, prevKline.close, 'take profit');
-          state.status = 'wait_short';
+          // 平仓后根据方向设置下一等待方向
+          if (direction === 'long') {
+            state.status = 'wait_long';
+          } else if (direction === 'short') {
+            state.status = 'wait_short';
+          } else {
+            state.status = 'wait_short';
+          }
         } else if (prevKline.close < prevKline.open) {
+          // 止损平多，反手做空
           await closePosition(strategy, account, prevKline.close, 'stop loss');
-          await openPosition(strategy, account, 'short', prevKline.close, prevKline.time, symbol);
+          if (direction === 'short') {
+            await openPosition(strategy, account, 'short', prevKline.close, prevKline.time, symbol);
+          } else if (direction === 'long') {
+            state.status = 'wait_long';
+          } else {
+            await openPosition(strategy, account, 'short', prevKline.close, prevKline.time, symbol);
+          }
         }
       } else if (position.side === 'short') {
         if (prevKline.close < prevKline.open) {
+          // 止盈平空
           await closePosition(strategy, account, prevKline.close, 'take profit');
-          state.status = 'wait_long';
+          if (direction === 'long') {
+            state.status = 'wait_long';
+          } else if (direction === 'short') {
+            state.status = 'wait_short';
+          } else {
+            state.status = 'wait_long';
+          }
         } else if (prevKline.close > prevKline.open) {
+          // 止损平空，反手做多
           await closePosition(strategy, account, prevKline.close, 'stop loss');
-          await openPosition(strategy, account, 'long', prevKline.close, prevKline.time, symbol);
+          if (direction === 'long') {
+            await openPosition(strategy, account, 'long', prevKline.close, prevKline.time, symbol);
+          } else if (direction === 'short') {
+            state.status = 'wait_short';
+          } else {
+            await openPosition(strategy, account, 'long', prevKline.close, prevKline.time, symbol);
+          }
         }
       }
     }
   }
 
+  // 更新未实现盈亏
   if (account.position) {
     const upnl = account.position.side === 'long'
       ? (latestKline.close - account.position.entryPrice) * account.position.size
@@ -207,10 +258,10 @@ async function runKlineKing(strategy) {
   account.markPrice = latestKline.close;
 }
 
-// 全市场最长上影线做空策略（修正版）
+// 全市场最长上影线做空策略（保持不变）
 async function runWickAny(strategy) {
   if (!strategy.config || !strategy.config.active) return;
-  if (strategy.scanning) return; // 扫描锁
+  if (strategy.scanning) return;
 
   const account = strategy.account;
   const interval = strategy.config.interval;
@@ -222,7 +273,6 @@ async function runWickAny(strategy) {
 
   const nowMs = Date.now();
 
-  // 有持仓：平仓条件为开仓时间 + 2个周期（下一根K线收盘）
   if (account.position) {
     const openKlineTime = strategy.state.openKlineTime;
     if (nowMs >= openKlineTime + 2 * intervalMsVal) {
@@ -234,7 +284,7 @@ async function runWickAny(strategy) {
     return;
   }
 
-  // 无持仓，计算当前K线收盘前时间窗口
+  // 计算收盘前窗口
   const now = new Date();
   let endTime;
   if (interval.endsWith('m')) {
@@ -264,37 +314,27 @@ async function runWickAny(strategy) {
   const timeToClose = endMs - nowMs;
   if (timeToClose > 59000 || timeToClose <= 0) return;
 
-  // 开始扫描
   strategy.scanning = true;
   try {
     const BATCH_SIZE = 10;
     const results = [];
-
     for (let i = 0; i < allSymbols.length; i += BATCH_SIZE) {
       const batch = allSymbols.slice(i, i + BATCH_SIZE);
-      const promises = batch.map(async symbol => {
+      const batchResults = await Promise.all(batch.map(async symbol => {
         const klines = await fetchKlines(symbol, interval, 1);
         if (klines && klines[0]) {
           const k = klines[0];
-          // 只考虑阴线且上影线 > 0
           if (k.close < k.open) {
             const wick = k.high - Math.max(k.open, k.close);
-            if (wick > 0) {
-              return { symbol, wick, kline: k };
-            }
+            if (wick > 0) return { symbol, wick, kline: k };
           }
         }
         return null;
-      });
-      const batchResults = await Promise.all(promises);
-      results.push(...batchResults.filter(r => r !== null));
-
-      if (i + BATCH_SIZE < allSymbols.length) {
-        await new Promise(resolve => setTimeout(resolve, 1000));
-      }
+      }));
+      results.push(...batchResults.filter(r => r));
+      if (i + BATCH_SIZE < allSymbols.length) await new Promise(r => setTimeout(r, 1000));
     }
 
-    // 找出上影线最长的合约
     let maxWick = 0;
     let target = null;
     results.forEach(r => {
@@ -345,6 +385,8 @@ app.get('/strategies', (req, res) => {
     leverage: s.config.leverage,
     amountUsdt: s.config.amountUsdt,
     marginMode: s.config.marginMode,
+    direction: s.config.direction || 'both',
+    shrink: s.config.shrink || false,
     active: s.config.active || false,
     equity: s.account.equity,
     position: s.account.position,
@@ -358,7 +400,7 @@ app.get('/strategies', (req, res) => {
 
 app.post('/strategy', (req, res) => {
   const userId = req.query.user || USER_ID;
-  const { name, type, symbol, interval, leverage, amountUsdt, marginMode } = req.body;
+  const { name, type, symbol, interval, leverage, amountUsdt, marginMode, direction, shrink } = req.body;
   if (!type || !interval || !leverage || !amountUsdt) {
     return res.status(400).json({ error: '参数不完整' });
   }
@@ -375,6 +417,8 @@ app.post('/strategy', (req, res) => {
       leverage: parseInt(leverage),
       amountUsdt: parseFloat(amountUsdt),
       marginMode: marginMode || 'cross',
+      direction: direction || 'both',
+      shrink: shrink === true,
       active: false
     },
     account: {
