@@ -21,10 +21,9 @@ if (!userData[USER_ID]) userData[USER_ID] = { strategies: {} };
 // ==================== 常量 ====================
 const OKX_API_BASE = 'https://www.okx.com';
 const TAKER_FEE_RATE = 0.0005;   // 手续费 0.05%
-const SLIPPAGE_RATE = 0.0;       // 滑点设为0，避免干扰
+const SLIPPAGE_RATE = 0.0;       // 滑点设为0，避免干扰（可自行调整）
 const now = () => Math.floor(Date.now() / 1000);
 
-// 周期对应的毫秒数（所有周期）
 const intervalMs = {
   '1m': 60 * 1000,
   '3m': 3 * 60 * 1000,
@@ -45,7 +44,7 @@ async function fetchKlines(symbol, interval, limit = 2) {
     const url = `${OKX_API_BASE}/api/v5/market/candles?instId=${symbol}&bar=${interval}&limit=${limit}`;
     const res = await axios.get(url);
     if (res.data.code === '0' && res.data.data) {
-      const klines = res.data.data.map(item => ({
+      const allKlines = res.data.data.map(item => ({
         time: parseInt(item[0]),
         open: parseFloat(item[1]),
         high: parseFloat(item[2]),
@@ -53,8 +52,14 @@ async function fetchKlines(symbol, interval, limit = 2) {
         close: parseFloat(item[4]),
         volume: parseFloat(item[5])
       })).reverse();
-      // 过滤掉无效数据（价格<=0或时间为0）
-      return klines.filter(k => k.time > 0 && k.close > 0 && k.open > 0);
+
+      // 严格过滤无效数据（价格为0或时间为0）
+      const validKlines = allKlines.filter(k => k.time > 0 && k.close > 0 && k.open > 0);
+      if (validKlines.length < limit) {
+        console.error(`[警告] ${symbol} ${interval} 有效K线不足 ${limit} 根，实际 ${validKlines.length} 根`);
+        return null;
+      }
+      return validKlines;
     }
   } catch (err) {
     console.error(`获取K线失败 ${symbol} ${interval}`, err.message);
@@ -62,7 +67,6 @@ async function fetchKlines(symbol, interval, limit = 2) {
   return null;
 }
 
-// 获取所有永续合约列表（用于上影线策略）
 let instrumentsCache = { data: null, timestamp: 0 };
 async function fetchAllSwapInstruments() {
   const now = Date.now();
@@ -97,23 +101,23 @@ function calculateSize(usdtAmount, leverage, price) {
 // 开仓
 async function openPosition(strategy, account, side, price, klineTime, symbol) {
   if (!price || price <= 0) {
-    console.error(`开仓失败: 价格无效 ${price}`);
+    console.error(`[开仓失败] 价格无效: ${price}`);
     return;
   }
   const { leverage, marginMode, amountUsdt } = strategy.config;
   const execPrice = getExecutedPrice(side, price);
   if (execPrice <= 0) {
-    console.error(`开仓失败: 执行价格无效 ${execPrice}`);
+    console.error(`[开仓失败] 执行价格无效: ${execPrice}`);
     return;
   }
   const size = calculateSize(amountUsdt, leverage, execPrice);
   if (size <= 0) {
-    console.error(`开仓失败: 数量无效 ${size}`);
+    console.error(`[开仓失败] 数量无效: ${size}`);
     return;
   }
   const initialMargin = (size * execPrice) / leverage;
   if (account.balance < initialMargin) {
-    console.error(`开仓失败: 余额不足，需要 ${initialMargin.toFixed(2)}，余额 ${account.balance.toFixed(2)}`);
+    console.error(`[开仓失败] 余额不足，需要 ${initialMargin.toFixed(2)}，余额 ${account.balance.toFixed(2)}`);
     return;
   }
   const fee = size * execPrice * TAKER_FEE_RATE;
@@ -145,7 +149,7 @@ async function closePosition(strategy, account, price, reason = '') {
   const position = account.position;
   if (!position) return null;
   if (!price || price <= 0) {
-    console.error(`平仓失败: 价格无效 ${price}`);
+    console.error(`[平仓失败] 价格无效: ${price}`);
     return;
   }
   const execPrice = getExecutedPrice(position.side === 'long' ? 'short' : 'long', price);
@@ -167,7 +171,6 @@ async function closePosition(strategy, account, price, reason = '') {
 }
 
 // ==================== 策略核心 ====================
-// K线之王策略（严格按收盘时间，所有周期）
 async function runKlineKing(strategy) {
   if (!strategy.config || !strategy.config.active) return;
 
@@ -181,14 +184,13 @@ async function runKlineKing(strategy) {
 
   const nowMs = Date.now();
 
-  // 按时间正序排列（最早到最新）
   const k0 = klines[0]; // 最老一根（已收盘）
   const k1 = klines[1]; // 中间一根（已收盘）
   const k2 = klines[2]; // 最新一根（可能未收盘）
 
   // 判断k1是否已收盘：当前时间 >= k1的开始时间 + 周期
   const k1EndTime = k1.time + intervalMsVal;
-  if (nowMs < k1EndTime) return; // 未收盘，等待
+  if (nowMs < k1EndTime) return;
 
   // 避免重复处理同一根K线
   if (strategy.lastProcessedKlineTime === k1.time) return;
@@ -227,7 +229,12 @@ async function runKlineKing(strategy) {
     }
 
     if (shouldOpen) {
-      await openPosition(strategy, account, openSide, k1.close, k1.time, symbol);
+      // 再次确保价格有效
+      if (k1.close > 0) {
+        await openPosition(strategy, account, openSide, k1.close, k1.time, symbol);
+      } else {
+        console.error(`[开仓跳过] 价格无效: ${k1.close}`);
+      }
     }
   } else {
     // ========== 有持仓 ==========
@@ -249,7 +256,7 @@ async function runKlineKing(strategy) {
         } else if (k1.close < k1.open) {
           await closePosition(strategy, account, k1.close, 'stop loss');
           if (direction === 'both' || direction === 'short') {
-            await openPosition(strategy, account, 'short', k1.close, k1.time, symbol);
+            if (k1.close > 0) await openPosition(strategy, account, 'short', k1.close, k1.time, symbol);
           } else {
             state.status = 'idle';
           }
@@ -261,7 +268,7 @@ async function runKlineKing(strategy) {
         } else if (k1.close > k1.open) {
           await closePosition(strategy, account, k1.close, 'stop loss');
           if (direction === 'both' || direction === 'long') {
-            await openPosition(strategy, account, 'long', k1.close, k1.time, symbol);
+            if (k1.close > 0) await openPosition(strategy, account, 'long', k1.close, k1.time, symbol);
           } else {
             state.status = 'idle';
           }
@@ -270,7 +277,7 @@ async function runKlineKing(strategy) {
     }
   }
 
-  // 更新未实现盈亏（使用k2的收盘价作为标记价格）
+  // 更新未实现盈亏
   if (account.position) {
     const upnl = account.position.side === 'long'
       ? (k2.close - account.position.entryPrice) * account.position.size
@@ -283,7 +290,7 @@ async function runKlineKing(strategy) {
   account.markPrice = k2.close;
 }
 
-// 全市场最长上影线做空策略（完整版，确保不报错）
+// 全市场最长上影线做空策略（完整版）
 async function runWickAny(strategy) {
   if (!strategy.config || !strategy.config.active) return;
   if (strategy.scanning) return;
@@ -298,12 +305,11 @@ async function runWickAny(strategy) {
 
   const nowMs = Date.now();
 
-  // 持仓平仓（持有一个周期）
   if (account.position) {
     const openKlineTime = strategy.state.openKlineTime;
     if (openKlineTime && nowMs >= openKlineTime + 2 * intervalMsVal) {
       const klines = await fetchKlines(account.position.symbol, interval, 1);
-      if (klines && klines[0]) {
+      if (klines && klines[0] && klines[0].close > 0) {
         await closePosition(strategy, account, klines[0].close, 'wick exit');
       }
     }
@@ -348,7 +354,7 @@ async function runWickAny(strategy) {
       const batch = allSymbols.slice(i, i + BATCH_SIZE);
       const batchResults = await Promise.all(batch.map(async symbol => {
         const klines = await fetchKlines(symbol, interval, 1);
-        if (klines && klines[0]) {
+        if (klines && klines[0] && klines[0].close > 0) {
           const k = klines[0];
           if (k.close < k.open) {
             const wick = k.high - Math.max(k.open, k.close);
@@ -370,7 +376,7 @@ async function runWickAny(strategy) {
       }
     });
 
-    if (target) {
+    if (target && target.kline.close > 0) {
       await openPosition(strategy, account, 'short', target.kline.close, target.kline.time, target.symbol);
     }
   } finally {
