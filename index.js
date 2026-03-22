@@ -52,13 +52,12 @@ async function fetchKlines(symbol, interval, limit = 2) {
         close: parseFloat(item[4]),
         volume: parseFloat(item[5])
       })).reverse();
-      // 过滤无效数据
       const valid = all.filter(k => k.time > 0 && k.close > 0 && k.open > 0);
       if (valid.length < limit) return null;
       return valid;
     }
   } catch (err) {
-    console.error(`获取K线失败 ${symbol} ${interval}`, err.message);
+    console.error(`[K线获取失败] ${symbol} ${interval}`, err.message);
   }
   return null;
 }
@@ -91,25 +90,24 @@ function calculateSize(usdtAmount, leverage, price) {
 
 // 开仓
 async function openPosition(strategy, account, side, price, klineTime, symbol) {
-  // 严格价格过滤：主流币价格应 > 1000，否则拒绝开仓
-  if (price <= 1000) {
-    console.error(`[开仓拒绝] 价格过低 (${price})，交易对 ${symbol}，可能是无效交易对或数据错误`);
+  if (!price || price <= 0) {
+    console.error(`[${strategy.id}] 开仓失败: 价格无效 ${price}`);
     return false;
   }
   const { leverage, marginMode, amountUsdt } = strategy.config;
   const execPrice = getExecutedPrice(side, price);
   if (execPrice <= 0) {
-    console.error(`[开仓失败] 执行价格无效: ${execPrice}`);
+    console.error(`[${strategy.id}] 开仓失败: 执行价格无效 ${execPrice}`);
     return false;
   }
   const size = calculateSize(amountUsdt, leverage, execPrice);
   if (size <= 0) {
-    console.error(`[开仓失败] 数量无效: ${size}`);
+    console.error(`[${strategy.id}] 开仓失败: 数量无效 ${size}`);
     return false;
   }
   const initialMargin = (size * execPrice) / leverage;
   if (account.balance < initialMargin) {
-    console.error(`[开仓失败] 余额不足，需要 ${initialMargin.toFixed(2)}，余额 ${account.balance.toFixed(2)}`);
+    console.error(`[${strategy.id}] 开仓失败: 余额不足，需要 ${initialMargin.toFixed(2)}，余额 ${account.balance.toFixed(2)}`);
     return false;
   }
   const fee = size * execPrice * TAKER_FEE_RATE;
@@ -131,9 +129,9 @@ async function openPosition(strategy, account, side, price, klineTime, symbol) {
   account.history.push({ type: 'open', side, size, price: execPrice, fee, time: now(), symbol });
   account.equity = account.balance + (position.size * position.entryPrice / position.leverage);
   strategy.state.status = side === 'long' ? 'in_long' : 'in_short';
-  strategy.state.openTime = klineTime;
-  strategy.state.barsSinceOpen = 0; // 开仓后经历的K线数（初始0）
-  console.log(`[${new Date().toISOString()}] 开仓 ${side} ${size.toFixed(4)}张 @ ${execPrice.toFixed(2)}，保证金 ${initialMargin.toFixed(2)}，余额 ${account.balance.toFixed(2)}，交易对 ${symbol}`);
+  strategy.state.openKlineTime = klineTime;
+  strategy.state.barsSinceOpen = 0; // 重置计数器
+  console.log(`[${strategy.id}] 开仓 ${side} ${size.toFixed(4)}张 @ ${execPrice.toFixed(2)}，保证金 ${initialMargin.toFixed(2)}，余额 ${account.balance.toFixed(2)}，交易对 ${symbol}`);
   return true;
 }
 
@@ -142,7 +140,7 @@ async function closePosition(strategy, account, price, reason = '') {
   const position = account.position;
   if (!position) return null;
   if (!price || price <= 0) {
-    console.error(`[平仓失败] 价格无效: ${price}`);
+    console.error(`[${strategy.id}] 平仓失败: 价格无效 ${price}`);
     return;
   }
   const execPrice = getExecutedPrice(position.side === 'long' ? 'short' : 'long', price);
@@ -159,7 +157,7 @@ async function closePosition(strategy, account, price, reason = '') {
   account.history.push({ type: 'close', side: position.side, size, price: execPrice, pnl, fee, time: now(), reason, symbol: position.symbol });
   account.position = null;
   account.equity = account.balance;
-  console.log(`[${new Date().toISOString()}] 平仓 ${position.side} ${size.toFixed(4)}张 @ ${execPrice.toFixed(2)}，盈亏 ${pnl.toFixed(2)}，余额 ${account.balance.toFixed(2)}，原因 ${reason}`);
+  console.log(`[${strategy.id}] 平仓 ${position.side} ${size.toFixed(4)}张 @ ${execPrice.toFixed(2)}，盈亏 ${pnl.toFixed(2)}，余额 ${account.balance.toFixed(2)}，原因 ${reason}`);
   return pnl;
 }
 
@@ -189,7 +187,7 @@ async function runKlineKing(strategy) {
     // 初始化：首次运行时，记录k1时间，不交易
     if (strategy.lastProcessedKlineTime === undefined) {
       strategy.lastProcessedKlineTime = k1.time;
-      console.log(`[${new Date().toISOString()}] 策略启动，等待下一根K线`);
+      console.log(`[${strategy.id}] 策略启动，等待下一根K线`);
       return;
     }
 
@@ -234,12 +232,13 @@ async function runKlineKing(strategy) {
       }
     } else {
       // ========== 有持仓 ==========
-      // 增加计数器：每次新K线出现，计数器+1（注意：开仓当次执行不增加，因为是在新K线出现时执行）
+      const position = account.position;
+      // 增加计数器：每次新K线出现，计数器+1
       state.barsSinceOpen = (state.barsSinceOpen || 0) + 1;
+      console.log(`[${strategy.id}] 计数器: barsSinceOpen = ${state.barsSinceOpen}`);
 
-      // 只有当开仓后至少经历1根新K线（即计数器≥1）时才平仓
+      // 当开仓后至少经历1根新K线时，平仓（即持有一根完整K线）
       if (state.barsSinceOpen >= 1) {
-        const position = account.position;
         if (position.side === 'long') {
           if (k1.close > k1.open) {
             await closePosition(strategy, account, k1.close, 'take profit');
@@ -284,23 +283,25 @@ async function runKlineKing(strategy) {
     }
     account.markPrice = k2.close;
   } catch (err) {
-    console.error(`策略执行异常:`, err);
+    console.error(`[${strategy.id}] 策略执行异常:`, err);
   }
 }
 
-// 上影线策略占位
+// 上影线策略（占位，不执行实际交易）
 async function runWickAny(strategy) {
-  if (!strategy.config || !strategy.config.active) return;
-  if (strategy.scanning) return;
-  // 略
+  // 此策略暂未实现，直接返回，避免干扰
+  return;
 }
 
 async function runStrategy(strategy) {
   try {
     if (!strategy.config || !strategy.config.active) return;
     const type = strategy.config.type;
-    if (type === 'kline_king') await runKlineKing(strategy);
-    else if (type === 'wick_any') await runWickAny(strategy);
+    if (type === 'kline_king') {
+      await runKlineKing(strategy);
+    } else if (type === 'wick_any') {
+      await runWickAny(strategy);
+    }
   } catch (err) {
     console.error(`调度策略失败:`, err);
   }
@@ -357,6 +358,7 @@ app.post('/strategy', (req, res) => {
     }
     const strategyId = uuidv4();
     const newStrategy = {
+      id: strategyId,  // 保存ID以便日志
       config: {
         name: name || strategyId,
         type,
@@ -465,7 +467,7 @@ app.post('/strategy/:id/close', async (req, res) => {
 
 app.get('/', (req, res) => res.send('双策略后端运行中'));
 
-// 全局异常捕获，防止进程退出
+// 全局异常捕获
 process.on('uncaughtException', (err) => {
   console.error('未捕获的异常:', err);
 });
