@@ -1,536 +1,625 @@
-const express = require('express');
-const axios = require('axios');
-const { v4: uuidv4 } = require('uuid');
-
-const app = express();
-app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  if (req.method === 'OPTIONS') return res.sendStatus(200);
-  next();
-});
-app.use(express.json());
-
-// 内存存储
-const userData = {};
-const USER_ID = 'demo_user';
-const DEFAULT_BALANCE = 10000;
-if (!userData[USER_ID]) userData[USER_ID] = { strategies: {} };
-
-// 常量
-const OKX_API_BASE = 'https://www.okx.com';
-const TAKER_FEE_RATE = 0.0005;
-const SLIPPAGE_RATE = 0.0;
-const now = () => Math.floor(Date.now() / 1000);
-
-const intervalMs = {
-  '1m': 60 * 1000,
-  '3m': 3 * 60 * 1000,
-  '5m': 5 * 60 * 1000,
-  '15m': 15 * 60 * 1000,
-  '30m': 30 * 60 * 1000,
-  '1h': 60 * 60 * 1000,
-  '2h': 2 * 60 * 60 * 1000,
-  '4h': 4 * 60 * 60 * 1000,
-  '6h': 6 * 60 * 60 * 1000,
-  '12h': 12 * 60 * 60 * 1000,
-  '1d': 24 * 60 * 60 * 1000
-};
-
-// ==================== 工具函数 ====================
-async function fetchKlines(symbol, interval, limit = 2) {
-  try {
-    const url = `${OKX_API_BASE}/api/v5/market/candles?instId=${symbol}&bar=${interval}&limit=${limit}`;
-    const res = await axios.get(url);
-    if (res.data.code === '0' && res.data.data) {
-      const all = res.data.data.map(item => ({
-        time: parseInt(item[0]),
-        open: parseFloat(item[1]),
-        high: parseFloat(item[2]),
-        low: parseFloat(item[3]),
-        close: parseFloat(item[4]),
-        volume: parseFloat(item[5])
-      })).reverse();
-
-      // 严格过滤：时间>0 且 收盘价>0 且 开盘价>0
-      const valid = all.filter(k => k.time > 0 && k.close > 0 && k.open > 0);
-      if (valid.length < limit) {
-        console.error(`[数据警告] ${symbol} ${interval} 有效K线不足 ${limit}，实际 ${valid.length}`);
-        return null;
-      }
-      return valid;
-    }
-  } catch (err) {
-    console.error(`获取K线失败 ${symbol} ${interval}`, err.message);
-  }
-  return null;
-}
-
-let instrumentsCache = { data: null, timestamp: 0 };
-async function fetchAllSwapInstruments() {
-  const now = Date.now();
-  if (instrumentsCache.data && now - instrumentsCache.timestamp < 3600000) return instrumentsCache.data;
-  try {
-    const url = `${OKX_API_BASE}/api/v5/public/instruments?instType=SWAP`;
-    const res = await axios.get(url);
-    if (res.data.code === '0' && res.data.data) {
-      instrumentsCache = { data: res.data.data.map(item => item.instId), timestamp: now };
-      return instrumentsCache.data;
-    }
-  } catch (err) { console.error('获取合约列表失败', err.message); }
-  return null;
-}
-
-function getExecutedPrice(side, basePrice) {
-  if (!basePrice || basePrice <= 0) return 0;
-  const slippage = basePrice * SLIPPAGE_RATE;
-  return side === 'long' ? basePrice + slippage : basePrice - slippage;
-}
-
-function calculateSize(usdtAmount, leverage, price) {
-  if (!price || price <= 0) return 0;
-  return (usdtAmount * leverage) / price;
-}
-
-async function openPosition(strategy, account, side, price, klineTime, symbol) {
-  // 最终防线：价格必须 > 0
-  if (!price || price <= 0) {
-    console.error(`[开仓失败] 价格无效: ${price}`);
-    return false;
-  }
-  const { leverage, marginMode, amountUsdt } = strategy.config;
-  const execPrice = getExecutedPrice(side, price);
-  if (execPrice <= 0) {
-    console.error(`[开仓失败] 执行价格无效: ${execPrice}`);
-    return false;
-  }
-  const size = calculateSize(amountUsdt, leverage, execPrice);
-  if (size <= 0) {
-    console.error(`[开仓失败] 数量无效: ${size}`);
-    return false;
-  }
-  const initialMargin = (size * execPrice) / leverage;
-  if (account.balance < initialMargin) {
-    console.error(`[开仓失败] 余额不足，需要 ${initialMargin.toFixed(2)}，余额 ${account.balance.toFixed(2)}`);
-    return false;
-  }
-  const fee = size * execPrice * TAKER_FEE_RATE;
-  account.balance -= fee;
-  account.balance -= initialMargin;
-
-  const position = {
-    symbol,
-    side,
-    size,
-    entryPrice: execPrice,
-    openTime: klineTime,
-    leverage,
-    marginMode,
-    margin: initialMargin,
-    unrealizedPnl: 0
-  };
-  account.position = position;
-  account.history.push({ type: 'open', side, size, price: execPrice, fee, time: now(), symbol });
-  account.equity = account.balance + (position.size * position.entryPrice / position.leverage);
-  strategy.state.status = side === 'long' ? 'in_long' : 'in_short';
-  strategy.state.openKlineTime = klineTime;
-  strategy.state.openSymbol = symbol;
-  strategy.state.barsSinceOpen = 0; // 开仓后经历的K线数
-  console.log(`[${new Date().toISOString()}] 开仓 ${side} ${size.toFixed(4)}张 @ ${execPrice.toFixed(2)}，保证金 ${initialMargin.toFixed(2)}，余额 ${account.balance.toFixed(2)}`);
-  return true;
-}
-
-async function closePosition(strategy, account, price, reason = '') {
-  const position = account.position;
-  if (!position) return null;
-  if (!price || price <= 0) {
-    console.error(`[平仓失败] 价格无效: ${price}`);
-    return;
-  }
-  const execPrice = getExecutedPrice(position.side === 'long' ? 'short' : 'long', price);
-  if (execPrice <= 0) return;
-  const size = position.size;
-  const pnl = position.side === 'long'
-    ? (execPrice - position.entryPrice) * size
-    : (position.entryPrice - execPrice) * size;
-  const fee = size * execPrice * TAKER_FEE_RATE;
-
-  account.balance += (size * position.entryPrice / position.leverage) + pnl - fee;
-  account.realizedPnl += pnl;
-  account.totalReturn = account.realizedPnl / DEFAULT_BALANCE;
-  account.history.push({ type: 'close', side: position.side, size, price: execPrice, pnl, fee, time: now(), reason, symbol: position.symbol });
-  account.position = null;
-  account.equity = account.balance;
-  console.log(`[${new Date().toISOString()}] 平仓 ${position.side} ${size.toFixed(4)}张 @ ${execPrice.toFixed(2)}，盈亏 ${pnl.toFixed(2)}，余额 ${account.balance.toFixed(2)}，原因 ${reason}`);
-  return pnl;
-}
-
-// ==================== 策略核心 ====================
-async function runKlineKing(strategy) {
-  if (!strategy.config || !strategy.config.active) return;
-
-  const { symbol, interval, direction, shrink } = strategy.config;
-  const intervalMsVal = intervalMs[interval];
-  if (!intervalMsVal) return;
-
-  // 获取最近3根K线
-  const klines = await fetchKlines(symbol, interval, 3);
-  if (!klines || klines.length < 3) return;
-
-  const nowMs = Date.now();
-
-  // k0: 最老一根（已收盘），k1: 中间一根（已收盘），k2: 最新一根（可能未收盘）
-  const k0 = klines[0];
-  const k1 = klines[1];
-  const k2 = klines[2];
-
-  // 判断k1是否已收盘（其结束时间 <= 当前时间）
-  const k1EndTime = k1.time + intervalMsVal;
-  if (nowMs < k1EndTime) return;
-
-  // 避免重复处理同一根K线
-  if (strategy.lastProcessedKlineTime === k1.time) return;
-  strategy.lastProcessedKlineTime = k1.time;
-
-  const account = strategy.account;
-  if (!strategy.state) strategy.state = { status: 'idle' };
-  const state = strategy.state;
-
-  // 缩量检查（k1与k0比较）
-  let volumeOk = true;
-  if (shrink) {
-    volumeOk = k1.volume < k0.volume;
-  }
-
-  // ========== 无持仓 ==========
-  if (!account.position) {
-    // 反转信号：k0与k1
-    const isBullReversal = (k0.close < k0.open) && (k1.close > k1.open);
-    const isBearReversal = (k0.close > k0.open) && (k1.close < k1.open);
-
-    let shouldOpen = false;
-    let openSide = null;
-
-    if (direction === 'both' || direction === 'long') {
-      if (isBullReversal && volumeOk) {
-        shouldOpen = true;
-        openSide = 'long';
-      }
-    }
-    if (direction === 'both' || direction === 'short') {
-      if (isBearReversal && volumeOk) {
-        shouldOpen = true;
-        openSide = 'short';
-      }
-    }
-
-    if (shouldOpen) {
-      // 开仓价格必须是有效值（k1.close > 0）
-      if (k1.close > 0) {
-        await openPosition(strategy, account, openSide, k1.close, k1.time, symbol);
-      } else {
-        console.error(`[开仓跳过] 价格无效: ${k1.close}`);
-      }
-    }
-  } else {
-    // ========== 有持仓 ==========
-    const position = account.position;
-    const openKlineTime = state.openKlineTime;
-    if (!openKlineTime || openKlineTime <= 0) {
-      console.error(`策略 ${strategy.config.name} 开仓时间无效，重置状态`);
-      state.status = 'idle';
-      account.position = null;
-      return;
-    }
-
-    // 增加计数器：开仓后经历的新K线数
-    state.barsSinceOpen = (state.barsSinceOpen || 0) + 1;
-
-    // 当开仓后已经历至少1根新K线时，进行平仓
-    if (state.barsSinceOpen >= 1) {
-      // 平仓使用当前处理的K线（k1）的收盘价
-      if (position.side === 'long') {
-        if (k1.close > k1.open) {
-          await closePosition(strategy, account, k1.close, 'take profit');
-          state.status = 'idle';
-          state.barsSinceOpen = 0;
-        } else if (k1.close < k1.open) {
-          await closePosition(strategy, account, k1.close, 'stop loss');
-          if (direction === 'both' || direction === 'short') {
-            if (k1.close > 0) await openPosition(strategy, account, 'short', k1.close, k1.time, symbol);
-          } else {
-            state.status = 'idle';
-          }
-          state.barsSinceOpen = 0;
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=yes">
+    <title>K线之王 · 增强版</title>
+    <script src="https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js"></script>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            background: #0a0e1a;
+            color: #e0e5f0;
+            padding: 16px 12px;
         }
-      } else if (position.side === 'short') {
-        if (k1.close < k1.open) {
-          await closePosition(strategy, account, k1.close, 'take profit');
-          state.status = 'idle';
-          state.barsSinceOpen = 0;
-        } else if (k1.close > k1.open) {
-          await closePosition(strategy, account, k1.close, 'stop loss');
-          if (direction === 'both' || direction === 'long') {
-            if (k1.close > 0) await openPosition(strategy, account, 'long', k1.close, k1.time, symbol);
-          } else {
-            state.status = 'idle';
-          }
-          state.barsSinceOpen = 0;
+        .card {
+            background: #151e2c;
+            border-radius: 20px;
+            padding: 16px;
+            margin-bottom: 16px;
+            border: 1px solid #2a3444;
         }
-      }
-    }
-  }
-
-  // 更新未实现盈亏
-  if (account.position) {
-    const upnl = account.position.side === 'long'
-      ? (k2.close - account.position.entryPrice) * account.position.size
-      : (account.position.entryPrice - k2.close) * account.position.size;
-    account.position.unrealizedPnl = upnl;
-    account.equity = account.balance + upnl;
-  } else {
-    account.equity = account.balance;
-  }
-  account.markPrice = k2.close;
-}
-
-// 全市场最长上影线做空策略（略，但需保留）
-async function runWickAny(strategy) {
-  if (!strategy.config || !strategy.config.active) return;
-  if (strategy.scanning) return;
-
-  const account = strategy.account;
-  const interval = strategy.config.interval;
-  const intervalMsVal = intervalMs[interval];
-  if (!intervalMsVal) return;
-
-  const allSymbols = await fetchAllSwapInstruments();
-  if (!allSymbols || allSymbols.length === 0) return;
-
-  const nowMs = Date.now();
-
-  if (account.position) {
-    const openKlineTime = strategy.state.openKlineTime;
-    if (openKlineTime && nowMs >= openKlineTime + 2 * intervalMsVal) {
-      const klines = await fetchKlines(account.position.symbol, interval, 1);
-      if (klines && klines[0] && klines[0].close > 0) {
-        await closePosition(strategy, account, klines[0].close, 'wick exit');
-      }
-    }
-    return;
-  }
-
-  const now = new Date();
-  let endTime;
-  if (interval.endsWith('m')) {
-    const minutes = parseInt(interval);
-    const cycleStart = Math.floor(now.getMinutes() / minutes) * minutes;
-    endTime = new Date(now);
-    endTime.setMinutes(cycleStart + minutes);
-    endTime.setSeconds(0);
-    endTime.setMilliseconds(0);
-  } else if (interval.endsWith('h')) {
-    const hours = parseInt(interval);
-    const cycleStart = Math.floor(now.getHours() / hours) * hours;
-    endTime = new Date(now);
-    endTime.setHours(cycleStart + hours);
-    endTime.setMinutes(0);
-    endTime.setSeconds(0);
-    endTime.setMilliseconds(0);
-  } else if (interval === '1d') {
-    endTime = new Date(now);
-    endTime.setDate(endTime.getDate() + 1);
-    endTime.setHours(0, 0, 0, 0);
-  } else {
-    return;
-  }
-
-  const endMs = endTime.getTime();
-  const timeToClose = endMs - nowMs;
-  if (timeToClose > 59000 || timeToClose <= 0) return;
-
-  strategy.scanning = true;
-  try {
-    const BATCH_SIZE = 10;
-    const results = [];
-    for (let i = 0; i < allSymbols.length; i += BATCH_SIZE) {
-      const batch = allSymbols.slice(i, i + BATCH_SIZE);
-      const batchResults = await Promise.all(batch.map(async symbol => {
-        const klines = await fetchKlines(symbol, interval, 1);
-        if (klines && klines[0] && klines[0].close > 0) {
-          const k = klines[0];
-          if (k.close < k.open) {
-            const wick = k.high - Math.max(k.open, k.close);
-            if (wick > 0) return { symbol, wick, kline: k };
-          }
+        .title {
+            font-size: 14px;
+            font-weight: 600;
+            margin-bottom: 12px;
+            color: #f0f3fa;
         }
-        return null;
-      }));
-      results.push(...batchResults.filter(r => r));
-      if (i + BATCH_SIZE < allSymbols.length) await new Promise(r => setTimeout(r, 1000));
-    }
+        .grid-2 {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+        }
+        label {
+            font-size: 11px;
+            color: #8e9ab0;
+            display: block;
+            margin-bottom: 4px;
+        }
+        input, select {
+            width: 100%;
+            padding: 10px 12px;
+            border-radius: 12px;
+            border: 1px solid #2a3444;
+            background: #0f1420;
+            color: #e0e5f0;
+            font-size: 14px;
+        }
+        button {
+            background: #2f6ed6;
+            border: none;
+            color: white;
+            padding: 12px;
+            border-radius: 30px;
+            font-weight: 600;
+            cursor: pointer;
+            width: 100%;
+        }
+        button.small {
+            padding: 6px 12px;
+            width: auto;
+        }
+        button.green { background: #27a64b; }
+        button.red { background: #d64f4f; }
+        .option-group {
+            display: flex;
+            gap: 20px;
+            align-items: center;
+            flex-wrap: nowrap;
+            white-space: nowrap;
+        }
+        .option-group label {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            font-size: 14px;
+            cursor: pointer;
+            margin: 0;
+            white-space: nowrap;
+        }
+        .row-section {
+            margin-bottom: 16px;
+        }
+        .row-section:last-of-type {
+            margin-bottom: 0;
+        }
+        .strategy-card {
+            background: #151e2c;
+            border-radius: 24px;
+            padding: 16px;
+            margin-bottom: 20px;
+            border: 1px solid #2a3444;
+        }
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-bottom: 12px;
+        }
+        .badge {
+            padding: 4px 10px;
+            border-radius: 30px;
+            font-size: 12px;
+            background: #2a3444;
+            color: #b0c4e0;
+            white-space: nowrap;
+        }
+        .badge.active { background: #1a4f2e; color: #8ce99a; }
+        .badge.long { background: #1a4f2e; color: #8ce99a; }
+        .badge.short { background: #6b2e2e; color: #f7a8a8; }
+        .position-grid {
+            display: grid;
+            grid-template-columns: repeat(5, 1fr);
+            gap: 12px;
+            background: #0f1420;
+            padding: 12px;
+            border-radius: 16px;
+            margin: 12px 0;
+        }
+        .pos-item {
+            text-align: left;
+        }
+        .pos-label {
+            font-size: 11px;
+            color: #8e9ab0;
+            margin-bottom: 4px;
+        }
+        .pos-value {
+            font-size: 14px;
+            font-weight: 600;
+            color: white;
+        }
+        .price-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 12px;
+            background: #0f1420;
+            padding: 12px;
+            border-radius: 16px;
+            margin: 12px 0;
+        }
+        .status-message {
+            text-align: center;
+            color: #8e9ab0;
+            padding: 16px;
+            background: #0f1420;
+            border-radius: 16px;
+            margin: 12px 0;
+        }
+        .trade-list {
+            list-style: none;
+            max-height: 200px;
+            overflow-y: auto;
+            margin-top: 8px;
+            background: #0f1420;
+            border-radius: 12px;
+            padding: 8px;
+        }
+        .trade-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 6px 0;
+            border-bottom: 1px solid #2a3444;
+            font-size: 12px;
+        }
+        .chart-container {
+            height: 200px;
+            margin: 12px 0;
+            border-radius: 16px;
+            overflow: hidden;
+            background: #000000;
+        }
+        .flex-between {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 8px;
+        }
+        .copy-btn {
+            background: #2f6ed6;
+            border: none;
+            padding: 6px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            cursor: pointer;
+            color: white;
+            margin-top: 8px;
+        }
+        .positive { color: #8ce99a; }
+        .negative { color: #f7a8a8; }
+        .back-link {
+            display: inline-block;
+            margin-bottom: 16px;
+            color: #8e9ab0;
+            text-decoration: none;
+        }
+        @media (max-width: 600px) {
+            .position-grid { grid-template-columns: repeat(3, 1fr); }
+            .price-grid { grid-template-columns: 1fr; gap: 8px; }
+        }
+        @media (max-width: 480px) {
+            .option-group { gap: 16px; }
+            .option-group label { font-size: 13px; }
+        }
+        @media (max-width: 360px) {
+            .option-group { gap: 12px; }
+            .option-group label { font-size: 12px; }
+        }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← 返回首页</a>
+    <div style="margin-bottom: 16px; font-size: 16px; font-weight: 600;">K线之王</div>
 
-    let maxWick = 0;
-    let target = null;
-    results.forEach(r => {
-      if (r.wick > maxWick) {
-        maxWick = r.wick;
-        target = r;
-      }
-    });
+    <div class="card">
+        <div class="title">📊 账户总览</div>
+        <div class="grid-2">
+            <div><div class="pos-label">总权益 (USDT)</div><div class="pos-value" id="totalEquity">0.00</div></div>
+            <div><div class="pos-label">总收益率</div><div class="pos-value" id="totalReturn">0.00%</div></div>
+        </div>
+    </div>
 
-    if (target && target.kline.close > 0) {
-      await openPosition(strategy, account, 'short', target.kline.close, target.kline.time, target.symbol);
-    }
-  } finally {
-    strategy.scanning = false;
-  }
-}
+    <div class="card">
+        <div class="title">➕ 创建新策略</div>
+        <div class="grid-2">
+            <div>
+                <label>策略名称</label>
+                <input type="text" id="newName" placeholder="可选">
+            </div>
+            <div>
+                <label>交易对</label>
+                <select id="newSymbolSelect" style="margin-bottom: 8px;">
+                    <option value="BTC-USDT-SWAP">BTC/USDT 永续</option>
+                    <option value="ETH-USDT-SWAP">ETH/USDT 永续</option>
+                    <option value="SOL-USDT-SWAP">SOL/USDT 永续</option>
+                    <option value="BNB-USDT-SWAP">BNB/USDT 永续</option>
+                    <option value="XRP-USDT-SWAP">XRP/USDT 永续</option>
+                    <option value="DOGE-USDT-SWAP">DOGE/USDT 永续</option>
+                    <option value="custom">其他 (手动输入)</option>
+                </select>
+                <div id="customSymbolContainer" style="display: none;"><input type="text" id="customSymbol" placeholder="如 LINK-USDT-SWAP"></div>
+                <input type="hidden" id="newSymbol" value="BTC-USDT-SWAP">
+            </div>
+            <div>
+                <label>K线周期</label>
+                <select id="newInterval">
+                    <option value="1m">1分钟</option>
+                    <option value="3m">3分钟</option>
+                    <option value="5m">5分钟</option>
+                    <option value="15m">15分钟</option>
+                    <option value="30m" selected>30分钟</option>
+                    <option value="1h">1小时</option>
+                    <option value="2h">2小时</option>
+                    <option value="4h">4小时</option>
+                    <option value="6h">6小时</option>
+                    <option value="12h">12小时</option>
+                </select>
+            </div>
+            <div>
+                <label>杠杆</label>
+                <input type="number" id="newLeverage" min="1" max="100" value="10" step="1">
+            </div>
+        </div>
 
-// 主调度函数
-async function runStrategy(strategy) {
-  if (!strategy.config || !strategy.config.active) return;
-  const type = strategy.config.type;
-  if (type === 'kline_king') {
-    await runKlineKing(strategy);
-  } else if (type === 'wick_any') {
-    await runWickAny(strategy);
-  }
-}
+        <div class="row-section">
+            <label>金额 (USDT)</label>
+            <input type="number" id="newAmount" min="1" value="100" step="1">
+        </div>
 
-setInterval(() => {
-  for (const userId in userData) {
-    for (const id in userData[userId].strategies) {
-      runStrategy(userData[userId].strategies[id]).catch(e => console.error(e));
-    }
-  }
-}, 1000);
+        <div class="row-section">
+            <label>方向</label>
+            <div class="option-group">
+                <label><input type="radio" name="newDirection" value="long"> 多</label>
+                <label><input type="radio" name="newDirection" value="short"> 空</label>
+                <label><input type="radio" name="newDirection" value="both" checked> 双向</label>
+            </div>
+        </div>
 
-// ==================== API 路由 ====================
-app.get('/strategies', (req, res) => {
-  const userId = req.query.user || USER_ID;
-  const strategies = userData[userId]?.strategies || {};
-  const list = Object.entries(strategies).map(([id, s]) => ({
-    id,
-    name: s.config.name || id,
-    type: s.config.type,
-    symbol: s.config.symbol || '',
-    interval: s.config.interval,
-    leverage: s.config.leverage,
-    amountUsdt: s.config.amountUsdt,
-    marginMode: s.config.marginMode,
-    direction: s.config.direction || 'both',
-    shrink: s.config.shrink || false,
-    active: s.config.active || false,
-    equity: s.account.equity,
-    position: s.account.position,
-    markPrice: s.account.markPrice || 0,
-    totalReturn: s.account.totalReturn,
-    history: s.account.history,
-    status: s.state?.status || 'idle'
-  }));
-  res.json(list);
-});
+        <div class="row-section">
+            <label>缩量</label>
+            <div class="option-group">
+                <label><input type="radio" name="newShrink" value="true"> 是</label>
+                <label><input type="radio" name="newShrink" value="false" checked> 否</label>
+            </div>
+        </div>
 
-app.post('/strategy', (req, res) => {
-  const userId = req.query.user || USER_ID;
-  const { name, type, symbol, interval, leverage, amountUsdt, marginMode, direction, shrink } = req.body;
-  if (!type || !interval || !leverage || !amountUsdt) {
-    return res.status(400).json({ error: '参数不完整' });
-  }
-  if (type === 'kline_king' && !symbol) {
-    return res.status(400).json({ error: 'K线之王需要选择交易对' });
-  }
-  const strategyId = uuidv4();
-  const newStrategy = {
-    config: {
-      name: name || strategyId,
-      type,
-      symbol: type === 'kline_king' ? symbol : '',
-      interval,
-      leverage: parseInt(leverage),
-      amountUsdt: parseFloat(amountUsdt),
-      marginMode: marginMode || 'cross',
-      direction: direction || 'both',
-      shrink: shrink === true,
-      active: false
-    },
-    account: {
-      balance: DEFAULT_BALANCE,
-      equity: DEFAULT_BALANCE,
-      position: null,
-      history: [],
-      realizedPnl: 0,
-      totalReturn: 0,
-      markPrice: 0,
-    },
-    state: { status: 'idle' }
-  };
-  userData[userId].strategies[strategyId] = newStrategy;
-  res.json({ id: strategyId });
-});
+        <div class="row-section">
+            <label>仓位模式</label>
+            <div class="option-group">
+                <label><input type="radio" name="newMarginMode" value="cross" checked> 全仓</label>
+                <label><input type="radio" name="newMarginMode" value="isolated"> 逐仓</label>
+            </div>
+        </div>
 
-app.delete('/strategy/:id', (req, res) => {
-  const userId = req.query.user || USER_ID;
-  const { id } = req.params;
-  if (userData[userId].strategies[id]) {
-    delete userData[userId].strategies[id];
-    res.json({ success: true });
-  } else {
-    res.status(404).json({ error: '策略不存在' });
-  }
-});
+        <button id="createBtn" style="margin-top: 8px;">创建策略</button>
+    </div>
 
-app.get('/strategy/:id', async (req, res) => {
-  const userId = req.query.user || USER_ID;
-  const { id } = req.params;
-  const strategy = userData[userId]?.strategies[id];
-  if (!strategy) return res.status(404).json({ error: '策略不存在' });
+    <div id="strategy-list"></div>
 
-  let klines = [];
-  if (strategy.config.symbol) {
-    klines = await fetchKlines(strategy.config.symbol, strategy.config.interval, 100);
-  }
-  res.json({
-    config: strategy.config,
-    account: strategy.account,
-    klines: klines || []
-  });
-});
+    <script>
+        const API_BASE = 'https://ooxoo-production.up.railway.app'; // 请确认您的Railway域名
+        const USER_ID = 'demo_user';
+        const STRATEGY_TYPE = 'kline_king';
 
-app.post('/strategy/:id/control', (req, res) => {
-  const userId = req.query.user || USER_ID;
-  const { id } = req.params;
-  const { active } = req.body;
-  const strategy = userData[userId]?.strategies[id];
-  if (!strategy) return res.status(404).json({ error: '策略不存在' });
-  strategy.config.active = active;
-  res.json({ success: true });
-});
+        // 交易对切换
+        const symbolSelect = document.getElementById('newSymbolSelect');
+        const customSymbolContainer = document.getElementById('customSymbolContainer');
+        const customSymbolInput = document.getElementById('customSymbol');
+        const symbolHidden = document.getElementById('newSymbol');
+        function updateSymbol() {
+            if (symbolSelect.value === 'custom') {
+                customSymbolContainer.style.display = 'block';
+                symbolHidden.value = customSymbolInput.value || 'CUSTOM-USDT-SWAP';
+            } else {
+                customSymbolContainer.style.display = 'none';
+                symbolHidden.value = symbolSelect.value;
+            }
+        }
+        symbolSelect.addEventListener('change', updateSymbol);
+        customSymbolInput.addEventListener('input', () => {
+            if (symbolSelect.value === 'custom') symbolHidden.value = customSymbolInput.value || 'CUSTOM-USDT-SWAP';
+        });
+        updateSymbol();
 
-app.post('/strategy/:id/close', async (req, res) => {
-  const userId = req.query.user || USER_ID;
-  const { id } = req.params;
-  const strategy = userData[userId]?.strategies[id];
-  if (!strategy) return res.status(404).json({ error: '策略不存在' });
+        document.getElementById('createBtn').addEventListener('click', async () => {
+            const name = document.getElementById('newName').value.trim() || undefined;
+            const symbol = document.getElementById('newSymbol').value.trim();
+            if (!symbol) return alert('请输入交易对');
+            const interval = document.getElementById('newInterval').value;
+            const leverage = parseInt(document.getElementById('newLeverage').value);
+            const amountUsdt = parseFloat(document.getElementById('newAmount').value);
+            const marginMode = document.querySelector('input[name="newMarginMode"]:checked').value;
+            const direction = document.querySelector('input[name="newDirection"]:checked').value;
+            const shrink = document.querySelector('input[name="newShrink"]:checked').value === 'true';
 
-  const account = strategy.account;
-  if (!account.position) return res.status(400).json({ error: '无持仓' });
+            const res = await fetch(`${API_BASE}/strategy?user=${USER_ID}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ 
+                    name, 
+                    type: STRATEGY_TYPE,
+                    symbol, 
+                    interval, 
+                    leverage, 
+                    amountUsdt, 
+                    marginMode,
+                    direction,
+                    shrink
+                })
+            });
+            if (res.ok) {
+                document.getElementById('newName').value = '';
+                symbolSelect.value = 'BTC-USDT-SWAP';
+                updateSymbol();
+                loadStrategies();
+            } else {
+                const err = await res.text();
+                alert('创建失败: ' + err);
+            }
+        });
 
-  let currentPrice = account.markPrice;
-  if (!currentPrice || currentPrice <= 0) {
-    const klines = await fetchKlines(strategy.config.symbol || 'BTC-USDT-SWAP', '1m', 1);
-    if (klines && klines[0]) currentPrice = klines[0].close;
-  }
-  if (!currentPrice) return res.status(500).json({ error: '无法获取价格' });
+        async function loadStrategies() {
+            try {
+                const res = await fetch(`${API_BASE}/strategies?user=${USER_ID}`);
+                const strategies = await res.json();
+                const filtered = strategies.filter(s => s.type === STRATEGY_TYPE);
+                renderStrategies(filtered);
+                updateTotal(filtered);
+            } catch (err) {
+                console.error(err);
+                document.getElementById('strategy-list').innerHTML = '<div class="card">加载失败</div>';
+            }
+        }
 
-  await closePosition(strategy, account, currentPrice, 'manual');
-  strategy.state.status = 'idle';
-  res.json({ success: true });
-});
+        function updateTotal(strategies) {
+            const totalEquity = strategies.reduce((sum, s) => sum + (s.equity || 10000), 0);
+            const totalCapital = strategies.length * 10000;
+            const totalReturn = ((totalEquity - totalCapital) / totalCapital * 100).toFixed(2);
+            document.getElementById('totalEquity').innerText = totalEquity.toFixed(2);
+            document.getElementById('totalReturn').innerText = (totalReturn > 0 ? '+' : '') + totalReturn + '%';
+        }
 
-app.get('/', (req, res) => res.send('双策略后端运行中'));
+        function copyTrades(history, strategyName) {
+            if (!history || history.length === 0) {
+                alert('暂无交易记录');
+                return;
+            }
+            const lines = history.map(t => {
+                const timeStr = new Date(t.time * 1000).toLocaleString('zh-CN', { hour12: false });
+                const sideText = t.side === 'long' ? '多' : '空';
+                const pnlText = t.pnl ? ` 盈亏: ${t.pnl.toFixed(2)}` : '';
+                return `${timeStr} ${t.type==='open'?'开':'平'} ${sideText} ${t.size.toFixed(4)} @ ${t.price.toFixed(2)}${pnlText}`;
+            }).join('\n');
+            const text = `策略: ${strategyName}\n${lines}`;
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(text).then(() => alert('✅ 已复制到剪贴板')).catch(() => fallbackCopy(text));
+            } else {
+                fallbackCopy(text);
+            }
+            function fallbackCopy(text) {
+                const textarea = document.createElement('textarea');
+                textarea.value = text;
+                document.body.appendChild(textarea);
+                textarea.select();
+                const success = document.execCommand('copy');
+                document.body.removeChild(textarea);
+                alert(success ? '✅ 已复制到剪贴板' : '❌ 复制失败，请手动复制');
+            }
+        }
 
-const port = process.env.PORT || 3000;
-app.listen(port, () => console.log(`✅ 服务器运行在端口 ${port}`));
+        function renderStrategies(strategies) {
+            const container = document.getElementById('strategy-list');
+            if (!strategies.length) {
+                container.innerHTML = '<div class="card">暂无策略，点击上方创建</div>';
+                return;
+            }
+            container.innerHTML = '';
+            strategies.forEach(s => {
+                const pos = s.position;
+                const card = document.createElement('div');
+                card.className = 'strategy-card';
+                card.dataset.id = s.id;
+
+                const directionMap = { long: '多', short: '空', both: '双向' };
+                const directionText = directionMap[s.direction] || '双向';
+                const shrinkText = s.shrink ? '缩量' : '';
+                const modeDisplay = shrinkText ? `${directionText}+${shrinkText}` : directionText;
+
+                const statusMap = {
+                    idle: '空闲',
+                    wait_long: '等待做多',
+                    wait_short: '等待做空',
+                    in_long: '持仓多',
+                    in_short: '持仓空'
+                };
+                const statusText = statusMap[s.status] || '未知';
+
+                let headerHtml = `
+                    <div class="card-header">
+                        <div>
+                            <span style="font-weight:600;">${s.name || s.id.slice(0,8)}</span>
+                            <span class="badge">${s.symbol}</span>
+                            <span class="badge">${modeDisplay}</span>
+                            <span class="badge ${s.active ? 'active' : ''}">${s.active ? '运行' : '停止'}</span>
+                            <span class="badge">${statusText}</span>
+                        </div>
+                        <span class="badge ${pos ? (pos.side === 'long' ? 'long' : 'short') : ''}">${pos ? (pos.side === 'long' ? '多' : '空') : (s.status === 'wait_long' ? '等待做多' : (s.status === 'wait_short' ? '等待做空' : '空闲'))}</span>
+                    </div>
+                `;
+
+                const strategyReturn = ((s.equity - 10000) / 10000 * 100).toFixed(2);
+                const fundsHtml = `
+                    <div style="background: #0f1420; border-radius: 16px; padding: 12px; margin: 12px 0;">
+                        <div class="flex-between">
+                            <div><span class="pos-label">资金总额</span><div class="pos-value">${s.equity.toFixed(2)} USDT</div></div>
+                            <div><span class="pos-label">策略收益率</span><div class="pos-value ${strategyReturn >= 0 ? 'positive' : 'negative'}">${strategyReturn}%</div></div>
+                        </div>
+                    </div>
+                `;
+
+                let positionHtml = '';
+                if (pos) {
+                    positionHtml = `
+                        <div class="position-grid">
+                            <div class="pos-item"><div class="pos-label">收益额</div><div class="pos-value ${pos.unrealizedPnl >= 0 ? 'positive' : 'negative'}">${(pos.unrealizedPnl || 0).toFixed(2)}</div></div>
+                            <div class="pos-item"><div class="pos-label">收益率</div><div class="pos-value ${pos.unrealizedPnl >= 0 ? 'positive' : 'negative'}">${((pos.unrealizedPnl / (pos.size * pos.entryPrice / pos.leverage) * 100) || 0).toFixed(2)}%</div></div>
+                            <div class="pos-item"><div class="pos-label">持仓量</div><div class="pos-value">${(pos.size * pos.entryPrice).toFixed(2)}</div></div>
+                            <div class="pos-item"><div class="pos-label">保证金</div><div class="pos-value">${(pos.margin || 0).toFixed(2)}</div></div>
+                            <div class="pos-item"><div class="pos-label">杠杆</div><div class="pos-value">${pos.leverage}x</div></div>
+                        </div>
+                        <div class="price-grid">
+                            <div class="pos-item"><div class="pos-label">开仓均价</div><div class="pos-value">${pos.entryPrice.toFixed(2)}</div></div>
+                            <div class="pos-item"><div class="pos-label">标记价格</div><div class="pos-value">${(s.markPrice || 0).toFixed(2)}</div></div>
+                            <div class="pos-item"><div class="pos-label">预估强平价</div><div class="pos-value">${(pos.entryPrice * (1 - 0.05)).toFixed(2)}</div></div>
+                        </div>
+                    `;
+                } else {
+                    let statusMsg = '';
+                    if (s.status === 'wait_long') statusMsg = '等待做多';
+                    else if (s.status === 'wait_short') statusMsg = '等待做空';
+                    else statusMsg = '空闲';
+                    positionHtml = `<div class="status-message">${statusMsg}</div>`;
+                }
+
+                const chartId = `chart-${s.id}`;
+                const chartHtml = `<div id="${chartId}" class="chart-container"></div>`;
+
+                const buttonsHtml = `
+                    <div class="flex-between" style="margin-top: 12px;">
+                        <button class="small ${s.active ? 'red' : 'green'}" onclick="toggleStrategy('${s.id}', ${!s.active})" style="flex:1; margin-right: 8px;">${s.active ? '停止' : '启动'}</button>
+                        ${pos ? `<button class="small red" onclick="closePosition('${s.id}')" style="flex:1; margin-right: 8px;">市价全平</button>` : ''}
+                        <button class="small red" onclick="deleteStrategy('${s.id}')" style="flex:1;">删除</button>
+                    </div>
+                `;
+
+                let tradesHtml = `
+                    <div class="pos-label" style="margin: 12px 0 4px;">所有交易记录</div>
+                    <ul class="trade-list">
+                `;
+                if (s.history && s.history.length) {
+                    s.history.slice().reverse().forEach(t => {
+                        const timeStr = new Date(t.time * 1000).toLocaleString('zh-CN', { hour12: false });
+                        const sign = t.pnl >= 0 ? '+' : '';
+                        tradesHtml += `<li class="trade-item"><span>${timeStr} ${t.type==='open'?'开':'平'} ${t.side==='long'?'多':'空'} ${t.size.toFixed(4)} @ ${t.price.toFixed(2)}</span><span class="${t.pnl>=0?'positive':'negative'}">${sign}${(t.pnl||0).toFixed(2)}</span></li>`;
+                    });
+                } else {
+                    tradesHtml += '<li class="trade-item" style="justify-content:center;">暂无交易</li>';
+                }
+                tradesHtml += `</ul>`;
+                tradesHtml += `<div style="display: flex; justify-content: flex-end;"><button class="copy-btn" onclick="copyTrades(${JSON.stringify(s.history).replace(/"/g, '&quot;')}, '${(s.name || s.id.slice(0,8))}')">📋 一键复制交易记录</button></div>`;
+
+                card.innerHTML = headerHtml + fundsHtml + positionHtml + chartHtml + buttonsHtml + tradesHtml;
+                container.appendChild(card);
+                loadKlines(s.id, chartId);
+            });
+        }
+
+        // 独立的K线图绘制
+        async function loadKlines(strategyId, chartId) {
+            try {
+                const res = await fetch(`${API_BASE}/strategy/${strategyId}?user=${USER_ID}`);
+                const data = await res.json();
+                if (data.klines && data.klines.length) {
+                    setTimeout(() => renderChart(chartId, data.klines), 50);
+                } else {
+                    const container = document.getElementById(chartId);
+                    if (container) container.innerHTML = '<div style="color:#8e9ab0; text-align:center; line-height:200px;">暂无K线数据</div>';
+                }
+            } catch (err) {
+                console.error('K线加载失败', err);
+                const container = document.getElementById(chartId);
+                if (container) container.innerHTML = '<div style="color:#f7a8a8; text-align:center; line-height:200px;">加载失败</div>';
+            }
+        }
+
+        function renderChart(containerId, klines) {
+            const container = document.getElementById(containerId);
+            if (!container) return;
+            container.style.width = '100%';
+            container.style.height = '200px';
+            container.innerHTML = '';
+
+            if (typeof LightweightCharts === 'undefined') {
+                container.innerHTML = '<div style="color:#f7a8a8; text-align:center; line-height:200px;">图表库加载失败</div>';
+                return;
+            }
+
+            try {
+                const chart = LightweightCharts.createChart(container, {
+                    width: container.clientWidth,
+                    height: 200,
+                    layout: { backgroundColor: '#000000', textColor: '#aaa' },
+                    grid: { vertLines: { color: '#2a3444' }, horzLines: { color: '#2a3444' } },
+                    rightPriceScale: { borderColor: '#2a3444' },
+                    timeScale: { borderColor: '#2a3444' },
+                });
+
+                const candleSeries = chart.addCandlestickSeries({
+                    upColor: '#8ce99a', downColor: '#f7a8a8', borderVisible: false,
+                    wickUpColor: '#8ce99a', wickDownColor: '#f7a8a8',
+                });
+
+                const closes = klines.map(k => k.close);
+                const ema9 = calculateEMA(closes, 9);
+                const emaData = klines.map((k, i) => ({ time: Math.floor(k.time / 1000), value: ema9[i] })).filter(d => d.value !== undefined);
+                const emaSeries = chart.addLineSeries({ color: '#f0b90b', lineWidth: 2 });
+                emaSeries.setData(emaData);
+
+                const volumeSeries = chart.addHistogramSeries({
+                    color: '#4caf50',
+                    priceFormat: { type: 'volume' },
+                    priceScaleId: 'volume',
+                });
+                chart.priceScale('volume').applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } });
+                const volumeData = klines.map(k => ({ time: Math.floor(k.time / 1000), value: k.volume, color: k.close > k.open ? '#8ce99a' : '#f7a8a8' }));
+                volumeSeries.setData(volumeData);
+
+                candleSeries.setData(klines.map(k => ({ time: Math.floor(k.time / 1000), open: k.open, high: k.high, low: k.low, close: k.close })));
+
+                chart.timeScale().fitContent();
+                new ResizeObserver(() => chart.resize(container.clientWidth, 200)).observe(container);
+            } catch (err) {
+                console.error('图表绘制错误', err);
+                container.innerHTML = '<div style="color:#f7a8a8; text-align:center; line-height:200px;">图表绘制失败</div>';
+            }
+        }
+
+        function calculateEMA(data, period) {
+            const k = 2 / (period + 1);
+            let ema = [data[0]];
+            for (let i = 1; i < data.length; i++) {
+                ema[i] = (data[i] - ema[i-1]) * k + ema[i-1];
+            }
+            return ema;
+        }
+
+        window.toggleStrategy = async (id, active) => {
+            await fetch(`${API_BASE}/strategy/${id}/control?user=${USER_ID}`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ active })
+            });
+            loadStrategies();
+        };
+
+        window.closePosition = async (id) => {
+            if (!confirm('确认市价全平当前仓位？')) return;
+            const res = await fetch(`${API_BASE}/strategy/${id}/close?user=${USER_ID}`, { method: 'POST' });
+            if (res.ok) { alert('平仓成功'); loadStrategies(); } else alert('平仓失败');
+        };
+
+        window.deleteStrategy = async (id) => {
+            if (!confirm('确认删除该策略？')) return;
+            const res = await fetch(`${API_BASE}/strategy/${id}?user=${USER_ID}`, { method: 'DELETE' });
+            if (res.ok) { alert('策略已删除'); loadStrategies(); } else alert('删除失败');
+        };
+
+        window.copyTrades = copyTrades;
+
+        loadStrategies();
+        setInterval(loadStrategies, 30000);
+    </script>
+</body>
+</html>
