@@ -12,13 +12,13 @@ app.use((req, res, next) => {
 });
 app.use(express.json());
 
-// 内存存储
+// ==================== 内存存储 ====================
 const userData = {};
 const USER_ID = 'demo_user';
 const DEFAULT_BALANCE = 10000;
 if (!userData[USER_ID]) userData[USER_ID] = { strategies: {} };
 
-// 常量
+// ==================== 常量 ====================
 const OKX_API_BASE = 'https://www.okx.com';
 const TAKER_FEE_RATE = 0.0005;
 const SLIPPAGE_RATE = 0.0;
@@ -52,13 +52,8 @@ async function fetchKlines(symbol, interval, limit = 2) {
         close: parseFloat(item[4]),
         volume: parseFloat(item[5])
       })).reverse();
-
-      // 严格过滤：时间>0 且 收盘价>0 且 开盘价>0
       const valid = all.filter(k => k.time > 0 && k.close > 0 && k.open > 0);
-      if (valid.length < limit) {
-        console.error(`[数据警告] ${symbol} ${interval} 有效K线不足 ${limit}，实际 ${valid.length}`);
-        return null;
-      }
+      if (valid.length < limit) return null;
       return valid;
     }
   } catch (err) {
@@ -93,8 +88,8 @@ function calculateSize(usdtAmount, leverage, price) {
   return (usdtAmount * leverage) / price;
 }
 
+// ==================== 交易执行 ====================
 async function openPosition(strategy, account, side, price, klineTime, symbol) {
-  // 最终防线：价格必须 > 0
   if (!price || price <= 0) {
     console.error(`[开仓失败] 价格无效: ${price}`);
     return false;
@@ -136,7 +131,7 @@ async function openPosition(strategy, account, side, price, klineTime, symbol) {
   strategy.state.status = side === 'long' ? 'in_long' : 'in_short';
   strategy.state.openKlineTime = klineTime;
   strategy.state.openSymbol = symbol;
-  strategy.state.barsSinceOpen = 0; // 开仓后经历的K线数
+  strategy.state.barsSinceOpen = 0;
   console.log(`[${new Date().toISOString()}] 开仓 ${side} ${size.toFixed(4)}张 @ ${execPrice.toFixed(2)}，保证金 ${initialMargin.toFixed(2)}，余额 ${account.balance.toFixed(2)}`);
   return true;
 }
@@ -180,14 +175,20 @@ async function runKlineKing(strategy) {
 
   const nowMs = Date.now();
 
-  // k0: 最老一根（已收盘），k1: 中间一根（已收盘），k2: 最新一根（可能未收盘）
   const k0 = klines[0];
   const k1 = klines[1];
   const k2 = klines[2];
 
-  // 判断k1是否已收盘（其结束时间 <= 当前时间）
+  // 判断k1是否已收盘
   const k1EndTime = k1.time + intervalMsVal;
   if (nowMs < k1EndTime) return;
+
+  // 初始化：首次运行时，记录k1的时间，不执行交易
+  if (strategy.lastProcessedKlineTime === undefined) {
+    strategy.lastProcessedKlineTime = k1.time;
+    console.log(`[${new Date().toISOString()}] 策略启动，初始化完成，等待下一根K线`);
+    return;
+  }
 
   // 避免重复处理同一根K线
   if (strategy.lastProcessedKlineTime === k1.time) return;
@@ -197,7 +198,7 @@ async function runKlineKing(strategy) {
   if (!strategy.state) strategy.state = { status: 'idle' };
   const state = strategy.state;
 
-  // 缩量检查（k1与k0比较）
+  // 缩量检查
   let volumeOk = true;
   if (shrink) {
     volumeOk = k1.volume < k0.volume;
@@ -205,7 +206,7 @@ async function runKlineKing(strategy) {
 
   // ========== 无持仓 ==========
   if (!account.position) {
-    // 反转信号：k0与k1
+    // 反转信号
     const isBullReversal = (k0.close < k0.open) && (k1.close > k1.open);
     const isBearReversal = (k0.close > k0.open) && (k1.close < k1.open);
 
@@ -226,7 +227,6 @@ async function runKlineKing(strategy) {
     }
 
     if (shouldOpen) {
-      // 开仓价格必须是有效值（k1.close > 0）
       if (k1.close > 0) {
         await openPosition(strategy, account, openSide, k1.close, k1.time, symbol);
       } else {
@@ -244,12 +244,11 @@ async function runKlineKing(strategy) {
       return;
     }
 
-    // 增加计数器：开仓后经历的新K线数
+    // 计数器
     state.barsSinceOpen = (state.barsSinceOpen || 0) + 1;
 
-    // 当开仓后已经历至少1根新K线时，进行平仓
+    // 开仓后至少经历1根新K线
     if (state.barsSinceOpen >= 1) {
-      // 平仓使用当前处理的K线（k1）的收盘价
       if (position.side === 'long') {
         if (k1.close > k1.open) {
           await closePosition(strategy, account, k1.close, 'take profit');
@@ -295,7 +294,7 @@ async function runKlineKing(strategy) {
   account.markPrice = k2.close;
 }
 
-// 全市场最长上影线做空策略（略，但需保留）
+// 全市场最长上影线做空策略（略，但必须保留）
 async function runWickAny(strategy) {
   if (!strategy.config || !strategy.config.active) return;
   if (strategy.scanning) return;
@@ -399,6 +398,7 @@ async function runStrategy(strategy) {
   }
 }
 
+// 每秒执行一次
 setInterval(() => {
   for (const userId in userData) {
     for (const id in userData[userId].strategies) {
@@ -527,6 +527,7 @@ app.post('/strategy/:id/close', async (req, res) => {
 
   await closePosition(strategy, account, currentPrice, 'manual');
   strategy.state.status = 'idle';
+  strategy.state.barsSinceOpen = 0;
   res.json({ success: true });
 });
 
