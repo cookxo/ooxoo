@@ -41,7 +41,6 @@ const intervalMs = {
 // ==================== 工具函数 ====================
 async function fetchKlines(symbol, interval, limit = 2) {
   try {
-    // 长周期增加请求数量，确保能获取到足够数据
     let actualLimit = limit;
     if (['1h', '2h', '4h', '6h', '12h', '1d'].includes(interval)) {
       actualLimit = Math.max(limit, 3);
@@ -63,6 +62,7 @@ async function fetchKlines(symbol, interval, limit = 2) {
         if (valid.length === 0) return null;
         return valid;
       }
+      console.log(`[K线成功] ${symbol} ${interval} 获取 ${valid.length} 根K线`);
       return valid;
     }
   } catch (err) {
@@ -297,7 +297,6 @@ async function runKlineKing(strategy) {
 
 // 上影线策略（占位，不执行实际交易）
 async function runWickAny(strategy) {
-  // 不执行任何交易，避免干扰
   return;
 }
 
