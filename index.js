@@ -41,12 +41,13 @@ const intervalMs = {
 // ==================== 工具函数 ====================
 async function fetchKlines(symbol, interval, limit = 2) {
   try {
-    // 长周期至少请求3根，避免数据不足
+    // 长周期请求更多K线，确保数据充足
     let actualLimit = limit;
     if (['1h', '2h', '4h', '6h', '12h', '1d'].includes(interval)) {
-      actualLimit = Math.max(limit, 3);
+      actualLimit = Math.max(limit, 10); // 至少10根
     }
     const url = `${OKX_API_BASE}/api/v5/market/candles?instId=${symbol}&bar=${interval}&limit=${actualLimit}`;
+    console.log(`[K线请求] ${symbol} ${interval} limit=${actualLimit}  URL: ${url}`);
     const res = await axios.get(url);
     if (res.data.code === '0' && res.data.data) {
       const all = res.data.data.map(item => ({
@@ -58,13 +59,18 @@ async function fetchKlines(symbol, interval, limit = 2) {
         volume: parseFloat(item[5])
       })).reverse();
       const valid = all.filter(k => k.time > 0 && k.close > 0 && k.open > 0);
-      if (valid.length < limit) {
-        console.warn(`[K线警告] ${symbol} ${interval} 有效K线不足 ${limit} 根，实际 ${valid.length} 根`);
-        if (valid.length === 0) return null;
-        return valid; // 返回部分数据，不强制要求满额
+      console.log(`[K线原始] ${symbol} ${interval} 收到 ${all.length} 根，有效 ${valid.length} 根`);
+      if (valid.length === 0) {
+        console.warn(`[K线警告] ${symbol} ${interval} 有效K线为0`);
+        return null;
       }
-      console.log(`[K线成功] ${symbol} ${interval} 获取 ${valid.length} 根K线`);
+      // 即使有效K线少于请求的limit，也返回已有数据（保证前端能显示部分K线）
+      if (valid.length < limit) {
+        console.warn(`[K线警告] ${symbol} ${interval} 有效K线不足 ${limit} 根，实际 ${valid.length} 根，仍返回可用数据`);
+      }
       return valid;
+    } else {
+      console.error(`[K线错误] ${symbol} ${interval} API返回错误: ${res.data.code} ${res.data.msg}`);
     }
   } catch (err) {
     console.error(`获取K线失败 ${symbol} ${interval}`, err.message);
@@ -177,12 +183,20 @@ async function runKlineKing(strategy) {
     if (!strategy.config || !strategy.config.active) return;
 
     const { symbol, interval, direction, shrink } = strategy.config;
-    const intervalMsVal = intervalMs[interval];
-    if (!intervalMsVal) return;
+    console.log(`[${strategy.id}] 策略检查: 周期 ${interval}, 交易对 ${symbol}, 活跃状态 ${strategy.config.active}`);
 
-    // 获取最近3根K线（长周期已自动增加请求数量）
+    const intervalMsVal = intervalMs[interval];
+    if (!intervalMsVal) {
+      console.error(`[${strategy.id}] 未知周期: ${interval}`);
+      return;
+    }
+
+    // 获取最近3根K线（长周期已在 fetchKlines 中增加请求数量）
     const klines = await fetchKlines(symbol, interval, 3);
-    if (!klines || klines.length < 3) return;
+    if (!klines || klines.length < 3) {
+      console.log(`[${strategy.id}] K线不足，无法执行策略`);
+      return;
+    }
 
     const nowMs = Date.now();
 
@@ -192,7 +206,10 @@ async function runKlineKing(strategy) {
 
     // 判断k1是否已收盘
     const k1EndTime = k1.time + intervalMsVal;
-    if (nowMs < k1EndTime) return;
+    if (nowMs < k1EndTime) {
+      console.log(`[${strategy.id}] k1未收盘: 当前时间 ${nowMs} < 结束时间 ${k1EndTime}`);
+      return;
+    }
 
     // 初始化：首次运行时，记录k1时间，不交易
     if (strategy.lastProcessedKlineTime === undefined) {
@@ -421,6 +438,7 @@ app.get('/strategy/:id', async (req, res) => {
 
     let klines = [];
     if (strategy.config.symbol) {
+      // 前端请求K线时，请求100根，长周期已调整
       klines = await fetchKlines(strategy.config.symbol, strategy.config.interval, 100);
     }
     res.json({
