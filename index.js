@@ -41,6 +41,7 @@ const intervalMs = {
 // ==================== 工具函数 ====================
 async function fetchKlines(symbol, interval, limit = 2) {
   try {
+    // 长周期至少请求3根，避免数据不足
     let actualLimit = limit;
     if (['1h', '2h', '4h', '6h', '12h', '1d'].includes(interval)) {
       actualLimit = Math.max(limit, 3);
@@ -60,7 +61,7 @@ async function fetchKlines(symbol, interval, limit = 2) {
       if (valid.length < limit) {
         console.warn(`[K线警告] ${symbol} ${interval} 有效K线不足 ${limit} 根，实际 ${valid.length} 根`);
         if (valid.length === 0) return null;
-        return valid;
+        return valid; // 返回部分数据，不强制要求满额
       }
       console.log(`[K线成功] ${symbol} ${interval} 获取 ${valid.length} 根K线`);
       return valid;
