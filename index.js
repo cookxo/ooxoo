@@ -24,6 +24,7 @@ const TAKER_FEE_RATE = 0.0005;
 const SLIPPAGE_RATE = 0.0;
 const now = () => Math.floor(Date.now() / 1000);
 
+// 周期对应的毫秒数（内部使用，保持小写键）
 const intervalMs = {
   '1m': 60 * 1000,
   '3m': 3 * 60 * 1000,
@@ -41,13 +42,24 @@ const intervalMs = {
 // ==================== 工具函数 ====================
 async function fetchKlines(symbol, interval, limit = 2) {
   try {
-    // 长周期请求更多K线，确保数据充足
+    // 将 interval 转换为欧易 API 要求的格式
+    let apiInterval = interval;
+    if (interval === '1h') apiInterval = '1H';
+    else if (interval === '2h') apiInterval = '2H';
+    else if (interval === '4h') apiInterval = '4H';
+    else if (interval === '6h') apiInterval = '6H';
+    else if (interval === '12h') apiInterval = '12H';
+    else if (interval === '1d') apiInterval = '1D';
+    // 短周期保持不变 (1m, 3m, 5m, 15m, 30m)
+
     let actualLimit = limit;
-    if (['1h', '2h', '4h', '6h', '12h', '1d'].includes(interval)) {
-      actualLimit = Math.max(limit, 10); // 至少10根
+    // 长周期请求更多K线，确保数据充足
+    if (['1H', '2H', '4H', '6H', '12H', '1D'].includes(apiInterval)) {
+      actualLimit = Math.max(limit, 10);
     }
-    const url = `${OKX_API_BASE}/api/v5/market/candles?instId=${symbol}&bar=${interval}&limit=${actualLimit}`;
-    console.log(`[K线请求] ${symbol} ${interval} limit=${actualLimit}  URL: ${url}`);
+
+    const url = `${OKX_API_BASE}/api/v5/market/candles?instId=${symbol}&bar=${apiInterval}&limit=${actualLimit}`;
+    console.log(`[K线请求] ${symbol} ${interval} -> ${apiInterval} limit=${actualLimit}`);
     const res = await axios.get(url);
     if (res.data.code === '0' && res.data.data) {
       const all = res.data.data.map(item => ({
@@ -60,17 +72,11 @@ async function fetchKlines(symbol, interval, limit = 2) {
       })).reverse();
       const valid = all.filter(k => k.time > 0 && k.close > 0 && k.open > 0);
       console.log(`[K线原始] ${symbol} ${interval} 收到 ${all.length} 根，有效 ${valid.length} 根`);
-      if (valid.length === 0) {
-        console.warn(`[K线警告] ${symbol} ${interval} 有效K线为0`);
-        return null;
-      }
-      // 即使有效K线少于请求的limit，也返回已有数据（保证前端能显示部分K线）
-      if (valid.length < limit) {
-        console.warn(`[K线警告] ${symbol} ${interval} 有效K线不足 ${limit} 根，实际 ${valid.length} 根，仍返回可用数据`);
-      }
+      if (valid.length === 0) return null;
       return valid;
     } else {
       console.error(`[K线错误] ${symbol} ${interval} API返回错误: ${res.data.code} ${res.data.msg}`);
+      return null;
     }
   } catch (err) {
     console.error(`获取K线失败 ${symbol} ${interval}`, err.message);
@@ -438,7 +444,6 @@ app.get('/strategy/:id', async (req, res) => {
 
     let klines = [];
     if (strategy.config.symbol) {
-      // 前端请求K线时，请求100根，长周期已调整
       klines = await fetchKlines(strategy.config.symbol, strategy.config.interval, 100);
     }
     res.json({
