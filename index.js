@@ -41,7 +41,12 @@ const intervalMs = {
 // ==================== 工具函数 ====================
 async function fetchKlines(symbol, interval, limit = 2) {
   try {
-    const url = `${OKX_API_BASE}/api/v5/market/candles?instId=${symbol}&bar=${interval}&limit=${limit}`;
+    // 长周期增加请求数量，确保能获取到足够数据
+    let actualLimit = limit;
+    if (['1h', '2h', '4h', '6h', '12h', '1d'].includes(interval)) {
+      actualLimit = Math.max(limit, 3);
+    }
+    const url = `${OKX_API_BASE}/api/v5/market/candles?instId=${symbol}&bar=${interval}&limit=${actualLimit}`;
     const res = await axios.get(url);
     if (res.data.code === '0' && res.data.data) {
       const all = res.data.data.map(item => ({
@@ -53,11 +58,15 @@ async function fetchKlines(symbol, interval, limit = 2) {
         volume: parseFloat(item[5])
       })).reverse();
       const valid = all.filter(k => k.time > 0 && k.close > 0 && k.open > 0);
-      if (valid.length < limit) return null;
+      if (valid.length < limit) {
+        console.warn(`[K线警告] ${symbol} ${interval} 有效K线不足 ${limit} 根，实际 ${valid.length} 根`);
+        if (valid.length === 0) return null;
+        return valid;
+      }
       return valid;
     }
   } catch (err) {
-    console.error(`[K线获取失败] ${symbol} ${interval}`, err.message);
+    console.error(`获取K线失败 ${symbol} ${interval}`, err.message);
   }
   return null;
 }
@@ -130,7 +139,7 @@ async function openPosition(strategy, account, side, price, klineTime, symbol) {
   account.equity = account.balance + (position.size * position.entryPrice / position.leverage);
   strategy.state.status = side === 'long' ? 'in_long' : 'in_short';
   strategy.state.openKlineTime = klineTime;
-  strategy.state.barsSinceOpen = 0; // 重置计数器
+  strategy.state.barsSinceOpen = 0;
   console.log(`[${strategy.id}] 开仓 ${side} ${size.toFixed(4)}张 @ ${execPrice.toFixed(2)}，保证金 ${initialMargin.toFixed(2)}，余额 ${account.balance.toFixed(2)}，交易对 ${symbol}`);
   return true;
 }
@@ -170,7 +179,7 @@ async function runKlineKing(strategy) {
     const intervalMsVal = intervalMs[interval];
     if (!intervalMsVal) return;
 
-    // 获取最近3根K线
+    // 获取最近3根K线（长周期已自动增加请求数量）
     const klines = await fetchKlines(symbol, interval, 3);
     if (!klines || klines.length < 3) return;
 
@@ -233,11 +242,10 @@ async function runKlineKing(strategy) {
     } else {
       // ========== 有持仓 ==========
       const position = account.position;
-      // 增加计数器：每次新K线出现，计数器+1
+      // 计数器增加
       state.barsSinceOpen = (state.barsSinceOpen || 0) + 1;
-      console.log(`[${strategy.id}] 计数器: barsSinceOpen = ${state.barsSinceOpen}`);
 
-      // 当开仓后至少经历1根新K线时，平仓（即持有一根完整K线）
+      // 当开仓后至少经历1根新K线时，平仓
       if (state.barsSinceOpen >= 1) {
         if (position.side === 'long') {
           if (k1.close > k1.open) {
@@ -289,7 +297,7 @@ async function runKlineKing(strategy) {
 
 // 上影线策略（占位，不执行实际交易）
 async function runWickAny(strategy) {
-  // 此策略暂未实现，直接返回，避免干扰
+  // 不执行任何交易，避免干扰
   return;
 }
 
@@ -358,7 +366,7 @@ app.post('/strategy', (req, res) => {
     }
     const strategyId = uuidv4();
     const newStrategy = {
-      id: strategyId,  // 保存ID以便日志
+      id: strategyId,
       config: {
         name: name || strategyId,
         type,
