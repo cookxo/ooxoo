@@ -106,6 +106,7 @@ function calculateSize(usdtAmount, leverage, price) {
   return (usdtAmount * leverage) / price;
 }
 
+// 开仓
 async function openPosition(strategy, account, side, price, klineTime, symbol) {
   if (!price || price <= 0) {
     console.error(`[${strategy.id}] 开仓失败: 价格无效 ${price}`);
@@ -151,6 +152,7 @@ async function openPosition(strategy, account, side, price, klineTime, symbol) {
   return true;
 }
 
+// 平仓
 async function closePosition(strategy, account, price, reason = '') {
   const position = account.position;
   if (!position) return null;
@@ -176,7 +178,7 @@ async function closePosition(strategy, account, price, reason = '') {
   return pnl;
 }
 
-// ==================== 策略核心（基于时间比较，无计数器） ====================
+// ==================== 策略核心（所有周期统一） ====================
 async function runKlineKing(strategy) {
   try {
     if (!strategy.config || !strategy.config.active) return;
@@ -185,7 +187,7 @@ async function runKlineKing(strategy) {
     const intervalMsVal = intervalMs[interval];
     if (!intervalMsVal) return;
 
-    // 获取最近3根K线（用于反转信号）
+    // 获取最近3根K线（用于反转信号和平仓判断）
     const klines = await fetchKlines(symbol, interval, 3);
     if (!klines || klines.length < 3) {
       console.log(`[${strategy.id}] ${interval} K线不足3根，无法执行策略`);
@@ -198,7 +200,6 @@ async function runKlineKing(strategy) {
     const k1 = klines[1];
     const k2 = klines[2];
 
-    // 打印关键K线信息
     console.log(`[${strategy.id}] ${interval} 当前时间: ${new Date(nowMs).toISOString()}`);
     console.log(`[${strategy.id}] k0: 时间=${new Date(k0.time).toISOString()}, 开=${k0.open}, 收=${k0.close}, 阳=${k0.close > k0.open}`);
     console.log(`[${strategy.id}] k1: 时间=${new Date(k1.time).toISOString()}, 开=${k1.open}, 收=${k1.close}, 阳=${k1.close > k1.open}`);
@@ -238,7 +239,6 @@ async function runKlineKing(strategy) {
 
     // ========== 无持仓 ==========
     if (!account.position) {
-      // 反转信号
       const isBullReversal = (k0.close < k0.open) && (k1.close > k1.open);
       const isBearReversal = (k0.close > k0.open) && (k1.close < k1.open);
       console.log(`[${strategy.id}] 反转信号: 做多=${isBullReversal}, 做空=${isBearReversal}`);
@@ -270,14 +270,15 @@ async function runKlineKing(strategy) {
       const position = account.position;
       const openKlineTime = state.openKlineTime;
 
-      // 直接使用时间比较：开仓后下一根K线收盘时平仓
-      // 开仓K线时间为 openKlineTime，平仓应在该K线 + 2个周期之后（即下一根K线收盘）
+      // 平仓条件：当前时间 >= 开仓K线时间 + 2 * 周期
       if (nowMs >= openKlineTime + 2 * intervalMsVal) {
         console.log(`[${strategy.id}] 达到平仓时间，即将平仓`);
         if (position.side === 'long') {
           if (k1.close > k1.open) {
             await closePosition(strategy, account, k1.close, 'take profit');
             state.status = 'idle';
+            // 关键修复：平仓后强制将 lastProcessedKlineTime 设置为当前已处理K线，防止同一K线内再次开仓
+            strategy.lastProcessedKlineTime = k1.time;
           } else if (k1.close < k1.open) {
             await closePosition(strategy, account, k1.close, 'stop loss');
             if (direction === 'both' || direction === 'short') {
@@ -285,11 +286,13 @@ async function runKlineKing(strategy) {
             } else {
               state.status = 'idle';
             }
+            strategy.lastProcessedKlineTime = k1.time;
           }
         } else if (position.side === 'short') {
           if (k1.close < k1.open) {
             await closePosition(strategy, account, k1.close, 'take profit');
             state.status = 'idle';
+            strategy.lastProcessedKlineTime = k1.time;
           } else if (k1.close > k1.open) {
             await closePosition(strategy, account, k1.close, 'stop loss');
             if (direction === 'both' || direction === 'long') {
@@ -297,6 +300,7 @@ async function runKlineKing(strategy) {
             } else {
               state.status = 'idle';
             }
+            strategy.lastProcessedKlineTime = k1.time;
           }
         }
       } else {
@@ -320,7 +324,7 @@ async function runKlineKing(strategy) {
   }
 }
 
-// 上影线策略（占位）
+// 上影线策略（占位，不执行实际交易）
 async function runWickAny(strategy) {
   return;
 }
