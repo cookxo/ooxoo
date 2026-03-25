@@ -110,6 +110,14 @@
         .badge.active { background: #1a4f2e; color: #8ce99a; }
         .badge.long { background: #1a4f2e; color: #8ce99a; }
         .badge.short { background: #6b2e2e; color: #f7a8a8; }
+        .error-badge {
+            background: #6b2e2e;
+            color: #f7a8a8;
+            font-size: 12px;
+            padding: 4px 8px;
+            border-radius: 12px;
+            margin-top: 8px;
+        }
         .position-grid {
             display: grid;
             grid-template-columns: repeat(5, 1fr);
@@ -300,7 +308,7 @@
     <div id="strategy-list"></div>
 
     <script>
-        const API_BASE = 'https://ooxoo-production.up.railway.app'; // 请确认您的Railway域名
+        const API_BASE = 'https://ooxoo-production.up.railway.app'; // ⚠️ 请替换为您的实际Railway域名
         const USER_ID = 'demo_user';
         const STRATEGY_TYPE = 'kline_king';
 
@@ -437,6 +445,9 @@
                 };
                 const statusText = statusMap[s.status] || '未知';
 
+                // 错误信息显示
+                const errorHtml = s.error ? `<div class="error-badge">⚠️ 错误: ${s.error}</div>` : '';
+
                 let headerHtml = `
                     <div class="card-header">
                         <div>
@@ -448,6 +459,7 @@
                         </div>
                         <span class="badge ${pos ? (pos.side === 'long' ? 'long' : 'short') : ''}">${pos ? (pos.side === 'long' ? '多' : '空') : (s.status === 'wait_long' ? '等待做多' : (s.status === 'wait_short' ? '等待做空' : '空闲'))}</span>
                     </div>
+                    ${errorHtml}
                 `;
 
                 const strategyReturn = ((s.equity - 10000) / 10000 * 100).toFixed(2);
@@ -517,7 +529,9 @@
             });
         }
 
-        // 独立的K线图绘制
+        // K线图绘制（增量更新）
+        const chartInstances = {};
+
         async function loadKlines(strategyId, chartId) {
             try {
                 const res = await fetch(`${API_BASE}/strategy/${strategyId}?user=${USER_ID}`);
@@ -540,7 +554,23 @@
             if (!container) return;
             container.style.width = '100%';
             container.style.height = '200px';
-            container.innerHTML = '';
+
+            if (chartInstances[containerId]) {
+                const { chart, candleSeries, volumeSeries, emaSeries } = chartInstances[containerId];
+                const adapted = klines.map(k => ({ time: Math.floor(k.time / 1000), open: k.open, high: k.high, low: k.low, close: k.close }));
+                candleSeries.setData(adapted);
+
+                const closes = klines.map(k => k.close);
+                const ema9 = calculateEMA(closes, 9);
+                const emaData = klines.map((k, i) => ({ time: Math.floor(k.time / 1000), value: ema9[i] })).filter(d => d.value !== undefined);
+                emaSeries.setData(emaData);
+
+                const volumeData = klines.map(k => ({ time: Math.floor(k.time / 1000), value: k.volume, color: k.close > k.open ? '#8ce99a' : '#f7a8a8' }));
+                volumeSeries.setData(volumeData);
+
+                chart.timeScale().fitContent();
+                return;
+            }
 
             if (typeof LightweightCharts === 'undefined') {
                 container.innerHTML = '<div style="color:#f7a8a8; text-align:center; line-height:200px;">图表库加载失败</div>';
@@ -580,6 +610,7 @@
                 candleSeries.setData(klines.map(k => ({ time: Math.floor(k.time / 1000), open: k.open, high: k.high, low: k.low, close: k.close })));
 
                 chart.timeScale().fitContent();
+                chartInstances[containerId] = { chart, candleSeries, volumeSeries, emaSeries };
                 new ResizeObserver(() => chart.resize(container.clientWidth, 200)).observe(container);
             } catch (err) {
                 console.error('图表绘制错误', err);
