@@ -418,6 +418,9 @@
             }
         }
 
+        // 图表实例缓存
+        const chartInstances = {};
+
         function renderStrategies(strategies) {
             const container = document.getElementById('strategy-list');
             if (!strategies.length) {
@@ -445,7 +448,6 @@
                 };
                 const statusText = statusMap[s.status] || '未知';
 
-                // 错误信息显示
                 const errorHtml = s.error ? `<div class="error-badge">⚠️ 错误: ${s.error}</div>` : '';
 
                 let headerHtml = `
@@ -525,12 +527,11 @@
 
                 card.innerHTML = headerHtml + fundsHtml + positionHtml + chartHtml + buttonsHtml + tradesHtml;
                 container.appendChild(card);
+
+                // 加载K线图（使用缓存）
                 loadKlines(s.id, chartId);
             });
         }
-
-        // K线图绘制（增量更新）
-        const chartInstances = {};
 
         async function loadKlines(strategyId, chartId) {
             try {
@@ -650,7 +651,7 @@
         window.copyTrades = copyTrades;
 
         loadStrategies();
-        setInterval(loadStrategies, 30000);
+        setInterval(loadStrategies, 60000); // 轮询间隔改为60秒，减少刷新
     </script>
 </body>
 </html>
