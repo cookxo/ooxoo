@@ -41,11 +41,18 @@ const intervalMs = {
 // ==================== 工具函数 ====================
 async function fetchKlines(symbol, interval, limit = 2) {
   try {
-    const url = `${OKX_API_BASE}/api/v5/market/candles?instId=${symbol}&bar=${interval}&limit=${limit}`;
+    let apiInterval = interval;
+    if (interval === '1h') apiInterval = '1H';
+    else if (interval === '2h') apiInterval = '2H';
+    else if (interval === '4h') apiInterval = '4H';
+    else if (interval === '6h') apiInterval = '6H';
+    else if (interval === '12h') apiInterval = '12H';
+    else if (interval === '1d') apiInterval = '1D';
+
+    const url = `${OKX_API_BASE}/api/v5/market/candles?instId=${symbol}&bar=${apiInterval}&limit=${limit}`;
     const res = await axios.get(url);
     if (res.data.code === '0' && res.data.data) {
-      // OKX返回的数据是 [时间, 开, 高, 低, 收, 成交量] 且按时间倒序（最新在前）
-      const all = res.data.data.map(item => ({
+      let all = res.data.data.map(item => ({
         time: parseInt(item[0]),
         open: parseFloat(item[1]),
         high: parseFloat(item[2]),
@@ -53,31 +60,21 @@ async function fetchKlines(symbol, interval, limit = 2) {
         close: parseFloat(item[4]),
         volume: parseFloat(item[5])
       }));
-      // 反转成正序（从旧到新）
-      const reversed = all.reverse();
-      const valid = reversed.filter(k => k.time > 0 && k.close > 0 && k.open > 0);
-      if (valid.length < limit) return null;
+      // 严格按时间升序排序
+      all.sort((a, b) => a.time - b.time);
+      // 过滤无效K线（价格为0或时间为0）
+      const valid = all.filter(k => k.time > 0 && k.close > 0 && k.open > 0);
+      // 只要有效K线数量 >= 2，就返回（不足2根时无法判断反转，但可以返回后续重试）
+      if (valid.length < 2) return null;
       return valid;
+    } else {
+      console.error(`[K线API错误] ${symbol} ${interval}: ${res.data.msg}`);
+      return null;
     }
   } catch (err) {
-    console.error(`[K线获取失败] ${symbol} ${interval}`, err.message);
+    console.error(`[获取K线失败] ${symbol} ${interval}`, err.message);
+    return null;
   }
-  return null;
-}
-
-let instrumentsCache = { data: null, timestamp: 0 };
-async function fetchAllSwapInstruments() {
-  const now = Date.now();
-  if (instrumentsCache.data && now - instrumentsCache.timestamp < 3600000) return instrumentsCache.data;
-  try {
-    const url = `${OKX_API_BASE}/api/v5/public/instruments?instType=SWAP`;
-    const res = await axios.get(url);
-    if (res.data.code === '0' && res.data.data) {
-      instrumentsCache = { data: res.data.data.map(item => item.instId), timestamp: now };
-      return instrumentsCache.data;
-    }
-  } catch (err) { console.error('获取合约列表失败', err.message); }
-  return null;
 }
 
 function getExecutedPrice(side, basePrice) {
@@ -92,31 +89,35 @@ function calculateSize(usdtAmount, leverage, price) {
 }
 
 // 开仓
-async function openPosition(strategy, account, side, price, klineTime, symbol) {
+async function openPosition(strategy, account, side, price, klineStartTime, symbol) {
   if (!price || price <= 0) {
-    console.error(`[${strategy.id}] 开仓失败: 价格无效 ${price}`);
+    const errMsg = `开仓失败: 价格无效 ${price}`;
+    console.error(`[${strategy.id}] ${errMsg}`);
+    strategy.state.error = errMsg;
     return false;
   }
-  
   const { leverage, marginMode, amountUsdt } = strategy.config;
   const execPrice = getExecutedPrice(side, price);
   if (execPrice <= 0) {
-    console.error(`[${strategy.id}] 开仓失败: 执行价格无效 ${execPrice}`);
+    const errMsg = `开仓失败: 执行价格无效 ${execPrice}`;
+    console.error(`[${strategy.id}] ${errMsg}`);
+    strategy.state.error = errMsg;
     return false;
   }
-  
   const size = calculateSize(amountUsdt, leverage, execPrice);
   if (size <= 0) {
-    console.error(`[${strategy.id}] 开仓失败: 数量无效 ${size}`);
+    const errMsg = `开仓失败: 数量无效 ${size}`;
+    console.error(`[${strategy.id}] ${errMsg}`);
+    strategy.state.error = errMsg;
     return false;
   }
-  
   const initialMargin = (size * execPrice) / leverage;
   if (account.balance < initialMargin) {
-    console.error(`[${strategy.id}] 开仓失败: 余额不足，需要 ${initialMargin.toFixed(2)}，余额 ${account.balance.toFixed(2)}`);
+    const errMsg = `开仓失败: 余额不足，需要 ${initialMargin.toFixed(2)}，余额 ${account.balance.toFixed(2)}`;
+    console.error(`[${strategy.id}] ${errMsg}`);
+    strategy.state.error = errMsg;
     return false;
   }
-  
   const fee = size * execPrice * TAKER_FEE_RATE;
   account.balance -= fee;
   account.balance -= initialMargin;
@@ -126,32 +127,19 @@ async function openPosition(strategy, account, side, price, klineTime, symbol) {
     side,
     size,
     entryPrice: execPrice,
-    entryKlineTime: klineTime,  // 开仓时的K线时间
-    openTime: Date.now(),
+    openKlineStart: klineStartTime,
     leverage,
     marginMode,
     margin: initialMargin,
     unrealizedPnl: 0
   };
-  
   account.position = position;
-  account.history.push({ 
-    type: 'open', 
-    side, 
-    size, 
-    price: execPrice, 
-    fee, 
-    time: now(), 
-    symbol 
-  });
-  account.equity = account.balance;
-  
-  // 重置状态
+  account.history.push({ type: 'open', side, size, price: execPrice, fee, time: now(), symbol });
+  account.equity = account.balance + (position.size * position.entryPrice / position.leverage);
   strategy.state.status = side === 'long' ? 'in_long' : 'in_short';
-  strategy.state.openKlineTime = klineTime;
-  strategy.state.barsSinceOpen = 0;
-  
-  console.log(`[${strategy.id}] 开仓 ${side} ${size.toFixed(4)}张 @ ${execPrice.toFixed(2)}，保证金 ${initialMargin.toFixed(2)}，余额 ${account.balance.toFixed(2)}，交易对 ${symbol}`);
+  strategy.state.openKlineStart = klineStartTime;
+  strategy.state.error = null;
+  console.log(`[${strategy.id}] 开仓 ${side} ${size.toFixed(4)}张 @ ${execPrice.toFixed(2)}，开仓K线开始时间=${new Date(klineStartTime).toISOString()}`);
   return true;
 }
 
@@ -160,13 +148,13 @@ async function closePosition(strategy, account, price, reason = '') {
   const position = account.position;
   if (!position) return null;
   if (!price || price <= 0) {
-    console.error(`[${strategy.id}] 平仓失败: 价格无效 ${price}`);
+    const errMsg = `平仓失败: 价格无效 ${price}`;
+    console.error(`[${strategy.id}] ${errMsg}`);
+    strategy.state.error = errMsg;
     return;
   }
-  
   const execPrice = getExecutedPrice(position.side === 'long' ? 'short' : 'long', price);
   if (execPrice <= 0) return;
-  
   const size = position.size;
   const pnl = position.side === 'long'
     ? (execPrice - position.entryPrice) * size
@@ -174,27 +162,17 @@ async function closePosition(strategy, account, price, reason = '') {
   const fee = size * execPrice * TAKER_FEE_RATE;
 
   account.balance += (size * position.entryPrice / position.leverage) + pnl - fee;
-  account.realizedPnl = (account.realizedPnl || 0) + pnl;
+  account.realizedPnl += pnl;
   account.totalReturn = account.realizedPnl / DEFAULT_BALANCE;
-  account.history.push({ 
-    type: 'close', 
-    side: position.side, 
-    size, 
-    price: execPrice, 
-    pnl, 
-    fee, 
-    time: now(), 
-    reason, 
-    symbol: position.symbol 
-  });
+  account.history.push({ type: 'close', side: position.side, size, price: execPrice, pnl, fee, time: now(), reason, symbol: position.symbol });
   account.position = null;
   account.equity = account.balance;
-  
-  console.log(`[${strategy.id}] 平仓 ${position.side} ${size.toFixed(4)}张 @ ${execPrice.toFixed(2)}，盈亏 ${pnl.toFixed(2)}，余额 ${account.balance.toFixed(2)}，原因 ${reason}`);
+  strategy.state.error = null;
+  console.log(`[${strategy.id}] 平仓 ${position.side} ${size.toFixed(4)}张 @ ${execPrice.toFixed(2)}，盈亏 ${pnl.toFixed(2)}，原因 ${reason}`);
   return pnl;
 }
 
-// ==================== 策略核心 ====================
+// ==================== 策略核心（绝对时间比较） ====================
 async function runKlineKing(strategy) {
   try {
     if (!strategy.config || !strategy.config.active) return;
@@ -203,21 +181,22 @@ async function runKlineKing(strategy) {
     const intervalMsVal = intervalMs[interval];
     if (!intervalMsVal) return;
 
-    // 获取最近3根K线（按时间正序）
+    // 获取最近3根K线（确保有足够历史数据判断反转）
     const klines = await fetchKlines(symbol, interval, 3);
-    if (!klines || klines.length < 3) return;
-
-    const nowMs = Date.now();
-    const k0 = klines[0]; // 最旧
-    const k1 = klines[1]; // 中间
-    const k2 = klines[2]; // 最新
-
-    // 检查k1是否已经收盘（k1的结束时间 < 当前时间）
-    const k1EndTime = k1.time + intervalMsVal;
-    if (nowMs < k1EndTime) {
-      // k1还未收盘，等待
+    if (!klines || klines.length < 3) {
+      // 数据不足，不执行，也不报错（等待下次）
       return;
     }
+
+    const nowMs = Date.now();
+
+    const k0 = klines[0];  // 更早一根已收盘
+    const k1 = klines[1];  // 最近一根已收盘
+    const k2 = klines[2];  // 当前未收盘
+
+    // 判断k1是否已收盘：其结束时间 <= 当前时间
+    const k1EndTime = k1.time + intervalMsVal;
+    if (nowMs < k1EndTime) return;
 
     // 初始化：首次运行时，记录k1时间，不交易
     if (strategy.lastProcessedKlineTime === undefined) {
@@ -227,22 +206,15 @@ async function runKlineKing(strategy) {
     }
 
     // 避免重复处理同一根K线
-    if (strategy.lastProcessedKlineTime === k1.time) {
-      return;
-    }
-    
-    // 检查k1时间是否有效（防止处理旧数据）
-    if (k1.time <= strategy.lastProcessedKlineTime) {
-      return;
-    }
-    
+    if (strategy.lastProcessedKlineTime === k1.time) return;
     strategy.lastProcessedKlineTime = k1.time;
 
     const account = strategy.account;
-    if (!strategy.state) strategy.state = { status: 'idle', barsSinceOpen: 0 };
+    if (!strategy.state) strategy.state = { status: 'idle', error: null };
     const state = strategy.state;
+    state.error = null;
 
-    // 缩量检查
+    // 缩量检查（k1与k0比较）
     let volumeOk = true;
     if (shrink) {
       volumeOk = k1.volume < k0.volume;
@@ -250,7 +222,7 @@ async function runKlineKing(strategy) {
 
     // ========== 无持仓 ==========
     if (!account.position) {
-      // 反转信号
+      // 反转信号：k0阴且k1阳 → 做多；k0阳且k1阴 → 做空
       const isBullReversal = (k0.close < k0.open) && (k1.close > k1.open);
       const isBearReversal = (k0.close > k0.open) && (k1.close < k1.open);
 
@@ -258,16 +230,10 @@ async function runKlineKing(strategy) {
       let openSide = null;
 
       if (direction === 'both' || direction === 'long') {
-        if (isBullReversal && volumeOk) {
-          shouldOpen = true;
-          openSide = 'long';
-        }
+        if (isBullReversal && volumeOk) shouldOpen = true, openSide = 'long';
       }
       if (direction === 'both' || direction === 'short') {
-        if (isBearReversal && volumeOk) {
-          shouldOpen = true;
-          openSide = 'short';
-        }
+        if (isBearReversal && volumeOk) shouldOpen = true, openSide = 'short';
       }
 
       if (shouldOpen) {
@@ -276,51 +242,34 @@ async function runKlineKing(strategy) {
     } else {
       // ========== 有持仓 ==========
       const position = account.position;
-      
-      // 检查开仓时的K线时间，确保至少过了一根完整的K线
-      // 只有当当前处理的K线时间 > 开仓时的K线时间时，才增加计数器
-      if (k1.time > state.openKlineTime) {
-        state.barsSinceOpen = (state.barsSinceOpen || 0) + 1;
-        console.log(`[${strategy.id}] 计数器: barsSinceOpen = ${state.barsSinceOpen}, k1.time=${k1.time}, openTime=${state.openKlineTime}`);
-      }
-
-      // 开仓后至少经过1根完整K线才能平仓（即持有一根完整K线）
-      if (state.barsSinceOpen >= 1) {
+      const openKlineStart = state.openKlineStart;
+      // 平仓条件：最近一根已收盘K线的时间 >= 开仓K线开始时间 + 周期
+      if (k1.time >= openKlineStart + intervalMsVal) {
         if (position.side === 'long') {
           if (k1.close > k1.open) {
-            // 阳线止盈
             await closePosition(strategy, account, k1.close, 'take profit');
             state.status = 'idle';
-            state.barsSinceOpen = 0;
           } else if (k1.close < k1.open) {
-            // 阴线止损并反手
             await closePosition(strategy, account, k1.close, 'stop loss');
             if (direction === 'both' || direction === 'short') {
               await openPosition(strategy, account, 'short', k1.close, k1.time, symbol);
             } else {
               state.status = 'idle';
-              state.barsSinceOpen = 0;
             }
           }
         } else if (position.side === 'short') {
           if (k1.close < k1.open) {
-            // 阴线止盈
             await closePosition(strategy, account, k1.close, 'take profit');
             state.status = 'idle';
-            state.barsSinceOpen = 0;
           } else if (k1.close > k1.open) {
-            // 阳线止损并反手
             await closePosition(strategy, account, k1.close, 'stop loss');
             if (direction === 'both' || direction === 'long') {
               await openPosition(strategy, account, 'long', k1.close, k1.time, symbol);
             } else {
               state.status = 'idle';
-              state.barsSinceOpen = 0;
             }
           }
         }
-      } else {
-        console.log(`[${strategy.id}] 持仓中，等待下一根K线平仓，当前计数: ${state.barsSinceOpen}`);
       }
     }
 
@@ -335,39 +284,28 @@ async function runKlineKing(strategy) {
       account.equity = account.balance;
     }
     account.markPrice = k2.close;
-    
   } catch (err) {
     console.error(`[${strategy.id}] 策略执行异常:`, err);
+    strategy.state.error = `策略异常: ${err.message}`;
   }
 }
 
-// 上影线策略（占位）
-async function runWickAny(strategy) {
-  return;
-}
+// 上影线策略占位
+async function runWickAny(strategy) { return; }
 
 async function runStrategy(strategy) {
   try {
     if (!strategy.config || !strategy.config.active) return;
     const type = strategy.config.type;
-    if (type === 'kline_king') {
-      await runKlineKing(strategy);
-    } else if (type === 'wick_any') {
-      await runWickAny(strategy);
-    }
+    if (type === 'kline_king') await runKlineKing(strategy);
+    else if (type === 'wick_any') await runWickAny(strategy);
   } catch (err) {
     console.error(`调度策略失败:`, err);
   }
 }
 
 // 每秒执行一次
-let lastRunTime = 0;
 setInterval(() => {
-  const now = Date.now();
-  // 避免在同一秒内重复执行多次
-  if (now - lastRunTime < 900) return;
-  lastRunTime = now;
-  
   for (const userId in userData) {
     for (const id in userData[userId].strategies) {
       runStrategy(userData[userId].strategies[id]).catch(e => console.error(e));
@@ -395,12 +333,14 @@ app.get('/strategies', (req, res) => {
       equity: s.account.equity,
       position: s.account.position,
       markPrice: s.account.markPrice || 0,
-      totalReturn: s.account.totalReturn || 0,
+      totalReturn: s.account.totalReturn,
       history: s.account.history,
-      status: s.state?.status || 'idle'
+      status: s.state?.status || 'idle',
+      error: s.state?.error || null
     }));
     res.json(list);
   } catch (err) {
+    console.error('获取策略列表失败', err);
     res.status(500).json({ error: '获取策略失败' });
   }
 });
@@ -439,15 +379,12 @@ app.post('/strategy', (req, res) => {
         totalReturn: 0,
         markPrice: 0,
       },
-      state: { 
-        status: 'idle',
-        barsSinceOpen: 0,
-        openKlineTime: 0
-      }
+      state: { status: 'idle', error: null }
     };
     userData[userId].strategies[strategyId] = newStrategy;
     res.json({ id: strategyId });
   } catch (err) {
+    console.error('创建策略失败', err);
     res.status(500).json({ error: '创建策略失败' });
   }
 });
@@ -463,6 +400,7 @@ app.delete('/strategy/:id', (req, res) => {
       res.status(404).json({ error: '策略不存在' });
     }
   } catch (err) {
+    console.error('删除策略失败', err);
     res.status(500).json({ error: '删除失败' });
   }
 });
@@ -476,7 +414,8 @@ app.get('/strategy/:id', async (req, res) => {
 
     let klines = [];
     if (strategy.config.symbol) {
-      klines = await fetchKlines(strategy.config.symbol, strategy.config.interval, 100);
+      // 前端K线图请求50根，减少负载
+      klines = await fetchKlines(strategy.config.symbol, strategy.config.interval, 50);
     }
     res.json({
       config: strategy.config,
@@ -484,6 +423,7 @@ app.get('/strategy/:id', async (req, res) => {
       klines: klines || []
     });
   } catch (err) {
+    console.error('获取策略详情失败', err);
     res.status(500).json({ error: '获取策略详情失败' });
   }
 });
@@ -498,6 +438,7 @@ app.post('/strategy/:id/control', (req, res) => {
     strategy.config.active = active;
     res.json({ success: true });
   } catch (err) {
+    console.error('控制策略失败', err);
     res.status(500).json({ error: '控制失败' });
   }
 });
@@ -521,9 +462,9 @@ app.post('/strategy/:id/close', async (req, res) => {
 
     await closePosition(strategy, account, currentPrice, 'manual');
     strategy.state.status = 'idle';
-    strategy.state.barsSinceOpen = 0;
     res.json({ success: true });
   } catch (err) {
+    console.error('手动平仓失败', err);
     res.status(500).json({ error: '平仓失败' });
   }
 });
